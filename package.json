@@ -1,0 +1,42 @@
+{
+  "name": "worktree-cli",
+  "version": "0.1.0",
+  "description": "Git worktree manager CLI — convert repos to bare, checkout worktrees, manage branches",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "wt": "./src/cli.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fredericoo/worktree-cli"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "bare",
+    "cli",
+    "developer-tools",
+    "bun"
+  ],
+  "files": [
+    "src",
+    "skills",
+    "CLAUDE.md"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "lint": "oxlint --type-aware src/",
+    "lint:fix": "oxlint --type-aware --fix src/",
+    "fmt": "oxfmt src/",
+    "fmt:check": "oxfmt --check src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "oxfmt": "latest",
+    "oxlint": "latest",
+    "oxlint-tsgolint": "latest",
+    "typescript": "^5.3.0"
+  }
+}
