@@ -41,6 +41,36 @@ describe('wt remove', () => {
     expect(exists).toBe(false);
   });
 
+  it('removes a worktree at a non-standard path', async () => {
+    await createBareRepo(tempDir);
+
+    await Bun.spawn(['git', '-C', join(tempDir, 'main'), 'branch', 'odd-path'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const nonStandardPath = join(tempDir, '.claude', 'worktrees', 'odd-path');
+    await Bun.spawn(['git', 'worktree', 'add', nonStandardPath, 'odd-path'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: join(tempDir, 'main'),
+    }).exited;
+
+    const info = await stat(nonStandardPath);
+    expect(info.isDirectory()).toBe(true);
+
+    const result = await runWt(['rm', 'odd-path'], join(tempDir, 'main'));
+    expect(result.exitCode).toBe(0);
+
+    let exists = true;
+    try {
+      await stat(nonStandardPath);
+    } catch {
+      exists = false;
+    }
+    expect(exists).toBe(false);
+  });
+
   it('fails when worktree does not exist', async () => {
     await createBareRepo(tempDir);
 

@@ -197,6 +197,35 @@ export async function listWorktrees(dir?: string): Promise<string> {
   return runGit(['worktree', 'list'], { cwd: dir });
 }
 
+export interface WorktreeEntry {
+  path: string;
+  branch: string;
+}
+
+const WORKTREE_LINE_PATTERN = /^(.+?)\s+[0-9a-f]+\s+\[(.+)\]$/;
+
+export function parseWorktreeList(raw: string): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const match = WORKTREE_LINE_PATTERN.exec(line);
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      entries.push({ path: match[1], branch: match[2] });
+    }
+  }
+  return entries;
+}
+
+export async function getWorktreeEntries(dir?: string): Promise<WorktreeEntry[]> {
+  const output = await listWorktrees(dir);
+  return parseWorktreeList(output);
+}
+
+export async function findWorktreeByBranch(branch: string, dir?: string): Promise<string | null> {
+  const entries = await getWorktreeEntries(dir);
+  const match = entries.find((entry) => entry.branch === branch);
+  return match?.path ?? null;
+}
+
 /** Replace `/` with `-` for worktree directory names. */
 export function flattenBranchName(branch: string): string {
   return branch.replace(/\//g, '-');

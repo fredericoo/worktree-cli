@@ -9,36 +9,30 @@ import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
 
 const BASH_WRAPPER = `wt() {
-  if [ "$1" = "co" ] || [ "$1" = "checkout" ]; then
-    local _wt_output
-    _wt_output=$(command wt "$@")
-    local _wt_exit=$?
-    if [ $_wt_exit -eq 0 ] && [ -n "$_wt_output" ] && [ -d "$_wt_output" ]; then
-      cd "$_wt_output" || return 1
-      return 0
-    fi
-    [ -n "$_wt_output" ] && echo "$_wt_output"
-    return $_wt_exit
+  local _wt_output
+  _wt_output=$(command wt "$@")
+  local _wt_exit=$?
+  if [ $_wt_exit -eq 0 ] && [ -n "$_wt_output" ] && [ -d "$_wt_output" ]; then
+    cd "$_wt_output" || return 1
+    return 0
   fi
-  command wt "$@"
+  [ -n "$_wt_output" ] && echo "$_wt_output"
+  return $_wt_exit
 }`;
 
 const ZSH_WRAPPER = BASH_WRAPPER;
 
 const FISH_WRAPPER = `function wt
-  if test "$argv[1]" = "co"; or test "$argv[1]" = "checkout"
-    set -l _wt_output (command wt $argv)
-    set -l _wt_exit $status
-    if test $_wt_exit -eq 0; and test -n "$_wt_output"; and test -d "$_wt_output"
-      cd "$_wt_output"
-      return 0
-    end
-    if test -n "$_wt_output"
-      echo "$_wt_output"
-    end
-    return $_wt_exit
+  set -l _wt_output (command wt $argv)
+  set -l _wt_exit $status
+  if test $_wt_exit -eq 0; and test -n "$_wt_output"; and test -d "$_wt_output"
+    cd "$_wt_output"
+    return 0
   end
-  command wt $argv
+  if test -n "$_wt_output"
+    echo "$_wt_output"
+  end
+  return $_wt_exit
 end`;
 
 const SHELLS: Record<string, string> = {
@@ -54,8 +48,9 @@ const HELP: CommandHelp = {
   synopsis: 'wt init <bash|zsh|fish>',
   description: `Output a shell function that wraps the wt binary.
 
-For checkout commands, the wrapper captures the worktree path from
-stdout and cd's into it. All other commands pass through unchanged.`,
+The wrapper captures stdout from any wt command. If the output is a
+directory path, it auto-cd's into it. Otherwise, it prints the output
+as-is. This enables auto-cd for checkout and the interactive selector.`,
 
   examples: [
     '# Add to ~/.zshrc',

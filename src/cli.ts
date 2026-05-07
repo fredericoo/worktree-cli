@@ -36,11 +36,54 @@ async function handleCommandHelp(
   return 0;
 }
 
+interface SelectableCommand {
+  value: string;
+  label: string;
+  hint: string;
+}
+
+const SELECTABLE_COMMANDS: SelectableCommand[] = [
+  { value: 'checkout', label: 'checkout (co)', hint: 'Create or switch to a worktree' },
+  { value: 'remove', label: 'remove (rm)', hint: 'Remove a worktree' },
+  { value: 'list', label: 'list', hint: 'List all worktrees' },
+  { value: 'create', label: 'create', hint: 'Convert a repo to bare+worktree layout' },
+];
+
+async function runCommandSelector(): Promise<number> {
+  const { stderrSelect, stderrCancel, isCancel } = await import('./interactive.js');
+
+  const selected = await stderrSelect({
+    message: 'What would you like to do?',
+    options: SELECTABLE_COMMANDS,
+  });
+
+  if (isCancel(selected) || typeof selected !== 'string') {
+    stderrCancel();
+    return 0;
+  }
+
+  const command = await loadCommand(selected);
+  if (command === null) {
+    console.error(`Unknown command: ${selected}`);
+    return 1;
+  }
+
+  return command.execute([]);
+}
+
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   const firstArg = args[0];
 
-  if (firstArg === undefined || isHelpFlag(firstArg)) {
+  if (firstArg === undefined) {
+    if (process.stdin.isTTY === true) {
+      return runCommandSelector();
+    }
+    await printHelp();
+    return 0;
+  }
+
+  if (isHelpFlag(firstArg)) {
     await printHelp();
     return 0;
   }

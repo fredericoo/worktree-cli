@@ -74,6 +74,24 @@ describe('wt checkout', () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it('detects worktree at non-standard path and returns it', async () => {
+    await Bun.spawn(['git', '-C', join(tempDir, 'main'), 'branch', 'odd-path-branch'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const nonStandardPath = join(tempDir, '.claude', 'worktrees', 'odd-path-branch');
+    await Bun.spawn(['git', 'worktree', 'add', nonStandardPath, 'odd-path-branch'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: join(tempDir, 'main'),
+    }).exited;
+
+    const result = await runWt(['co', 'odd-path-branch'], join(tempDir, 'main'));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(nonStandardPath);
+  });
+
   it('stdout contains only the path (no messages)', async () => {
     await Bun.spawn(['git', '-C', join(tempDir, 'main'), 'branch', 'clean-output'], {
       stdout: 'pipe',

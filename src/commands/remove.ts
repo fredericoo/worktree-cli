@@ -5,17 +5,23 @@
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import { isBareRepo, getBareRoot, flattenBranchName, removeWorktree, deleteBranch } from '../git';
-import { join } from 'path';
-import { stat } from 'fs/promises';
+import {
+  isBareRepo,
+  getBareRoot,
+  findWorktreeByBranch,
+  removeWorktree,
+  deleteBranch,
+  getWorktreeEntries,
+} from '../git';
+import { relative } from 'path';
 
 const HELP: CommandHelp = {
   name: 'wt remove',
   synopsis: 'wt remove [--force] [--delete-branch] <branch>',
   description: `Remove a worktree for a branch.
 
-The worktree directory is identified by flattening the branch name
-(replacing / with -) and looking for it in the bare repo root.`,
+The worktree is found by querying git's worktree registry, so it works
+regardless of where the worktree directory lives on disk.`,
 
   flags: [
     { flag: '--force, -f', description: 'Force removal even with uncommitted changes' },
@@ -39,6 +45,52 @@ The worktree directory is identified by flattening the branch name
   ],
 };
 
+const FLAG_NAMES = new Set(['--force', '-f', '--delete-branch']);
+
+function extractFlags(args: string[]): string[] {
+  return args.filter((arg) => FLAG_NAMES.has(arg));
+}
+
+async function promptForWorktree(self: CommandHandler, flags: string[]): Promise<number> {
+  if (!(await isBareRepo())) {
+    console.error(
+      'Error: Not in a bare repo. wt remove only works with bare repo worktree setups.',
+    );
+    return 1;
+  }
+
+  const { stderrSelect, stderrCancel, stderrLog, isCancel } = await import(
+    '../interactive.js'
+  );
+
+  const bareRoot = await getBareRoot();
+  const entries = await getWorktreeEntries(bareRoot);
+
+  if (entries.length === 0) {
+    stderrLog.warn('No worktrees to remove.');
+    return 1;
+  }
+
+  const selected = await stderrSelect({
+    message: 'Which worktree to remove?',
+    options: entries.map((entry) => {
+      const relativePath = relative(bareRoot, entry.path);
+      return {
+        value: entry.branch,
+        label: entry.branch,
+        hint: relativePath !== '' ? relativePath : entry.path,
+      };
+    }),
+  });
+
+  if (isCancel(selected) || typeof selected !== 'string') {
+    stderrCancel();
+    return 0;
+  }
+
+  return self.execute([...flags, selected]);
+}
+
 export const command: CommandHandler = {
   name: 'remove',
   description: 'Remove a worktree',
@@ -54,8 +106,11 @@ export const command: CommandHandler = {
     const branch = positionalArgs[0];
 
     if (branch === undefined || branch === '') {
-      printCommandUsage(HELP);
-      return 1;
+      if (process.stdin.isTTY !== true) {
+        printCommandUsage(HELP);
+        return 1;
+      }
+      return promptForWorktree(this, extractFlags(args));
     }
 
     if (!(await isBareRepo())) {
@@ -66,19 +121,16 @@ export const command: CommandHandler = {
     }
 
     const bareRoot = await getBareRoot();
-    const worktreeDir = flattenBranchName(branch);
-    const worktreePath = join(bareRoot, worktreeDir);
 
-    try {
-      await stat(worktreePath);
-    } catch {
-      console.error(`Error: No worktree found at ${worktreePath}`);
+    const worktreePath = await findWorktreeByBranch(branch, bareRoot);
+    if (worktreePath === null) {
+      console.error(`Error: No worktree found for branch '${branch}'`);
       return 1;
     }
 
     try {
       await removeWorktree(worktreePath, { force, cwd: bareRoot });
-      console.error(`Removed worktree: ${worktreeDir}`);
+      console.error(`Removed worktree: ${branch}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Error removing worktree: ${message}`);

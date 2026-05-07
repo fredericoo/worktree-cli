@@ -35,10 +35,11 @@ describe('wt init', () => {
     expect(result.exitCode).toBe(1);
   });
 
-  it('wrapper only intercepts co and checkout', async () => {
+  it('wrapper auto-cd applies to all commands', async () => {
     const result = await runWt(['init', 'zsh']);
-    expect(result.stdout).toContain('"co"');
-    expect(result.stdout).toContain('"checkout"');
+    expect(result.stdout).toContain('cd "$_wt_output"');
+    expect(result.stdout).not.toContain('"co"');
+    expect(result.stdout).not.toContain('"checkout"');
   });
 
   it('wrapper is a single invocation (no double wt call)', async () => {

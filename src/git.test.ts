@@ -8,7 +8,10 @@ import {
   isBareRepo,
   hasUncommittedChanges,
   getDefaultBranch,
+  findWorktreeByBranch,
+  parseWorktreeList,
 } from './git';
+import { createTempDir, createBareRepo } from './test-scaffold';
 
 describe('flattenBranchName', () => {
   it('replaces forward slashes with hyphens', () => {
@@ -163,5 +166,125 @@ describe('git repo detection', () => {
       expect(result.branch).toBe('main');
       expect(result.isDefault).toBe(true);
     });
+  });
+});
+
+describe('parseWorktreeList', () => {
+  it('parses standard git worktree list output', () => {
+    const raw = [
+      '/home/user/repo/.bare          abc1234 (bare)',
+      '/home/user/repo/main           def5678 [main]',
+      '/home/user/repo/feature-a      1111111 [feature-a]',
+    ].join('\n');
+
+    const entries = parseWorktreeList(raw);
+    expect(entries).toEqual([
+      { path: '/home/user/repo/main', branch: 'main' },
+      { path: '/home/user/repo/feature-a', branch: 'feature-a' },
+    ]);
+  });
+
+  it('excludes bare entry — regex matches [branch] not (bare)', () => {
+    const raw = '/home/user/repo/.bare  abc1234 (bare)';
+    expect(parseWorktreeList(raw)).toEqual([]);
+  });
+
+  it('handles branch names with slashes', () => {
+    const raw = '/home/user/repo/feature-nested  abc1234 [feature/nested]';
+    const entries = parseWorktreeList(raw);
+    expect(entries).toEqual([{ path: '/home/user/repo/feature-nested', branch: 'feature/nested' }]);
+  });
+
+  it('handles empty string', () => {
+    expect(parseWorktreeList('')).toEqual([]);
+  });
+
+  it('handles single worktree output', () => {
+    const raw = '/home/user/repo/main  abc1234 [main]';
+    expect(parseWorktreeList(raw)).toEqual([{ path: '/home/user/repo/main', branch: 'main' }]);
+  });
+
+  it('handles paths with spaces', () => {
+    const raw = '/home/user/my repo/main  abc1234 [main]';
+    const entries = parseWorktreeList(raw);
+    expect(entries).toEqual([{ path: '/home/user/my repo/main', branch: 'main' }]);
+  });
+});
+
+describe('findWorktreeByBranch', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('wt-find-worktree-test-');
+    await createBareRepo(tempDir);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns path for a worktree at the conventional location', async () => {
+    const mainDir = join(tempDir, 'main');
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'feature-a'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const conventionalPath = join(tempDir, 'feature-a');
+    await Bun.spawn(['git', 'worktree', 'add', conventionalPath, 'feature-a'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: mainDir,
+    }).exited;
+
+    const result = await findWorktreeByBranch('feature-a', mainDir);
+    expect(result).toBe(conventionalPath);
+  });
+
+  it('returns path for a worktree at a non-standard location', async () => {
+    const mainDir = join(tempDir, 'main');
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'feature-b'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const nonStandardPath = join(tempDir, '.claude', 'worktrees', 'feature-b');
+    await Bun.spawn(['git', 'worktree', 'add', nonStandardPath, 'feature-b'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: mainDir,
+    }).exited;
+
+    const result = await findWorktreeByBranch('feature-b', mainDir);
+    expect(result).toBe(nonStandardPath);
+  });
+
+  it('returns null when no worktree exists for the branch', async () => {
+    const mainDir = join(tempDir, 'main');
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'orphan-branch'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const result = await findWorktreeByBranch('orphan-branch', mainDir);
+    expect(result).toBeNull();
+  });
+
+  it('handles branch names with slashes', async () => {
+    const mainDir = join(tempDir, 'main');
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'feature/nested'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const worktreePath = join(tempDir, 'feature-nested');
+    await Bun.spawn(['git', 'worktree', 'add', worktreePath, 'feature/nested'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: mainDir,
+    }).exited;
+
+    const result = await findWorktreeByBranch('feature/nested', mainDir);
+    expect(result).toBe(worktreePath);
   });
 });

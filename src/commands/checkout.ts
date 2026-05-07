@@ -9,9 +9,15 @@
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import { isBareRepo, getBareRoot, flattenBranchName, addWorktree } from '../git';
-import { join } from 'path';
-import { stat } from 'fs/promises';
+import {
+  isBareRepo,
+  getBareRoot,
+  flattenBranchName,
+  addWorktree,
+  findWorktreeByBranch,
+  getWorktreeEntries,
+} from '../git';
+import { join, relative } from 'path';
 
 const HELP: CommandHelp = {
   name: 'wt checkout',
@@ -47,6 +53,68 @@ With shell integration (wt init zsh), checkout auto-cd's into the worktree.`,
   ],
 };
 
+const CREATE_NEW_BRANCH = '__create_new_branch__';
+
+async function promptForBranch(self: CommandHandler): Promise<number> {
+  if (!(await isBareRepo())) {
+    console.error(
+      'Error: Not in a bare repo. wt checkout only works with bare repo worktree setups.',
+    );
+    console.error('Run "wt create" first to convert your repo.');
+    return 1;
+  }
+
+  const { stderrSelect, stderrText, stderrCancel, isCancel } = await import(
+    '../interactive.js'
+  );
+
+  const bareRoot = await getBareRoot();
+  const entries = await getWorktreeEntries(bareRoot);
+
+  const selected = await stderrSelect({
+    message: 'Which branch?',
+    options: [
+      ...entries.map((entry) => {
+        const relativePath = relative(bareRoot, entry.path);
+        return {
+          value: entry.branch,
+          label: entry.branch,
+          hint: relativePath !== '' ? relativePath : entry.path,
+        };
+      }),
+      {
+        value: CREATE_NEW_BRANCH,
+        label: 'Create new branch + worktree',
+        hint: 'wt co -b <branch>',
+      },
+    ],
+  });
+
+  if (isCancel(selected)) {
+    stderrCancel();
+    return 0;
+  }
+
+  if (selected === CREATE_NEW_BRANCH) {
+    const branchName = await stderrText({
+      message: 'Branch name:',
+      validate: (value) => {
+        if (value === undefined || value.trim() === '') return 'Branch name is required';
+        return undefined;
+      },
+    });
+
+    if (isCancel(branchName)) {
+      stderrCancel();
+      return 0;
+    }
+
+    return self.execute(['-b', branchName]);
+  }
+
+  return self.execute([selected]);
+}
+
 export const command: CommandHandler = {
   name: 'checkout',
   description: 'Create or switch to a worktree for a branch',
@@ -58,8 +126,11 @@ export const command: CommandHandler = {
     const branch = filteredArgs[0];
 
     if (branch === undefined || branch === '') {
-      printCommandUsage(HELP);
-      return 1;
+      if (process.stdin.isTTY !== true) {
+        printCommandUsage(HELP);
+        return 1;
+      }
+      return promptForBranch(this);
     }
 
     if (!(await isBareRepo())) {
@@ -71,18 +142,15 @@ export const command: CommandHandler = {
     }
 
     const bareRoot = await getBareRoot();
+
+    const existingPath = await findWorktreeByBranch(branch, bareRoot);
+    if (existingPath !== null) {
+      console.log(existingPath);
+      return 0;
+    }
+
     const worktreeDir = flattenBranchName(branch);
     const worktreePath = join(bareRoot, worktreeDir);
-
-    try {
-      const info = await stat(worktreePath);
-      if (info.isDirectory()) {
-        console.log(worktreePath);
-        return 0;
-      }
-    } catch {
-      // Directory doesn't exist — create it below
-    }
 
     try {
       await addWorktree(worktreePath, branch, { createBranch, cwd: bareRoot });
