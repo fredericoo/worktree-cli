@@ -1,5 +1,13 @@
 # worktree-cli
 
+## 0.3.0
+
+### Minor Changes
+
+- Base new branches off `origin/main` (fetched fresh) by default instead of the stale local HEAD. Add `--from <branch>` flag to `wt co -b` to specify a different remote branch as the base.
+
+- Add interactive branch selection when running `wt co` without arguments. Uses @clack/prompts for a TUI picker with branch list and "create new branch" option.
+
 ## 0.2.0
 
 ### Minor Changes
