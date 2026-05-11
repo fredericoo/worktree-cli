@@ -152,6 +152,7 @@ export async function getUntrackedFiles(dir?: string): Promise<string[]> {
 
 export interface AddWorktreeOptions {
   createBranch?: boolean;
+  startPoint?: string;
   cwd?: string;
 }
 
@@ -165,7 +166,27 @@ export async function addWorktree(
       ? ['worktree', 'add', worktreePath, '-b', branch]
       : ['worktree', 'add', worktreePath, branch];
 
+  if (options.startPoint !== undefined) {
+    args.push(options.startPoint);
+  }
+
   await runGit(args, { cwd: options.cwd });
+}
+
+export async function fetchRef(
+  remote: string,
+  ref: string,
+  options: { cwd?: string } = {},
+): Promise<boolean> {
+  const result = await runGitSafe(['fetch', remote, ref], { cwd: options.cwd });
+  return result.exitCode === 0;
+}
+
+export async function refExists(ref: string, options: { cwd?: string } = {}): Promise<boolean> {
+  const result = await runGitSafe(['rev-parse', '--verify', '--quiet', ref], {
+    cwd: options.cwd,
+  });
+  return result.exitCode === 0;
 }
 
 export interface RemoveWorktreeOptions {

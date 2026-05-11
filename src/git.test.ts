@@ -10,8 +10,10 @@ import {
   getDefaultBranch,
   findWorktreeByBranch,
   parseWorktreeList,
+  fetchRef,
+  refExists,
 } from './git';
-import { createTempDir, createBareRepo } from './test-scaffold';
+import { createTempDir, createBareRepo, createBareRepoWithRemote } from './test-scaffold';
 
 describe('flattenBranchName', () => {
   it('replaces forward slashes with hyphens', () => {
@@ -286,5 +288,63 @@ describe('findWorktreeByBranch', () => {
 
     const result = await findWorktreeByBranch('feature/nested', mainDir);
     expect(result).toBe(worktreePath);
+  });
+});
+
+describe('fetchRef', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('wt-fetch-test-');
+    await createBareRepoWithRemote(tempDir);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns true when fetching an existing remote branch', async () => {
+    const result = await fetchRef('origin', 'main', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(true);
+  });
+
+  it('returns false when fetching a nonexistent remote branch', async () => {
+    const result = await fetchRef('origin', 'nonexistent', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(false);
+  });
+
+  it('returns false when remote does not exist', async () => {
+    const noRemoteDir = await createTempDir('wt-no-remote-');
+    await createBareRepo(noRemoteDir);
+
+    const result = await fetchRef('origin', 'main', { cwd: join(noRemoteDir, 'main') });
+    expect(result).toBe(false);
+
+    await rm(noRemoteDir, { recursive: true, force: true });
+  });
+});
+
+describe('refExists', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('wt-refexists-test-');
+    await createBareRepoWithRemote(tempDir);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns true for an existing ref', async () => {
+    const mainDir = join(tempDir, 'main');
+    await fetchRef('origin', 'main', { cwd: mainDir });
+    const result = await refExists('origin/main', { cwd: mainDir });
+    expect(result).toBe(true);
+  });
+
+  it('returns false for a nonexistent ref', async () => {
+    const result = await refExists('origin/nonexistent', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(false);
   });
 });

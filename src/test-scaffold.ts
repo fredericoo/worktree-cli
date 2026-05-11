@@ -37,6 +37,30 @@ export async function createBareRepo(dir: string): Promise<void> {
     .exited;
 }
 
+export async function createBareRepoWithRemote(dir: string): Promise<string> {
+  await createBareRepo(dir);
+
+  const upstreamDir = join(dir, '.upstream');
+  const mainDir = join(dir, 'main');
+
+  await Bun.spawn(['git', 'init', '--bare', '-b', 'main', upstreamDir], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  }).exited;
+
+  await Bun.spawn(['git', '-C', mainDir, 'config', 'remote.origin.url', upstreamDir], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  }).exited;
+
+  await Bun.spawn(['git', '-C', mainDir, 'push', 'origin', 'main'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  }).exited;
+
+  return upstreamDir;
+}
+
 export async function runWt(
   args: string[],
   cwd?: string,

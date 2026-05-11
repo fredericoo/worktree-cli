@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { stat, rm } from 'fs/promises';
 import { join } from 'path';
-import { createTempDir, createBareRepo, runWt } from '../test-scaffold';
+import { createTempDir, createBareRepo, createBareRepoWithRemote, runWt } from '../test-scaffold';
 
 describe('wt checkout', () => {
   let tempDir: string;
@@ -104,5 +104,91 @@ describe('wt checkout', () => {
     const lines = result.stdout.split('\n');
     expect(lines.length).toBe(1);
     expect(result.stdout).toMatch(/^\//);
+  });
+});
+
+describe('wt checkout --from', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('wt-checkout-from-test-');
+    await createBareRepoWithRemote(tempDir);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('bases new branch on origin/main by default', async () => {
+    const mainDir = join(tempDir, 'main');
+
+    await Bun.write(join(mainDir, 'remote-file.txt'), 'from remote');
+    await Bun.spawn(['git', '-C', mainDir, 'add', '.'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+    await Bun.spawn(['git', '-C', mainDir, 'commit', '-m', 'remote commit'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+    await Bun.spawn(['git', '-C', mainDir, 'push', 'origin', 'main'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    await Bun.spawn(['git', '-C', mainDir, 'reset', '--hard', 'HEAD~1'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const result = await runWt(['co', '-b', 'from-origin'], mainDir);
+    expect(result.exitCode).toBe(0);
+
+    const newWorktree = result.stdout;
+    const file = Bun.file(join(newWorktree, 'remote-file.txt'));
+    expect(await file.exists()).toBe(true);
+  });
+
+  it('uses explicit --from branch', async () => {
+    const mainDir = join(tempDir, 'main');
+
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'develop'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+    await Bun.spawn(['git', '-C', mainDir, 'push', 'origin', 'develop'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const result = await runWt(['co', '-b', 'feat', '--from', 'develop'], mainDir);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('origin/develop');
+  });
+
+  it('fails when explicit --from branch does not exist on remote', async () => {
+    const result = await runWt(
+      ['co', '-b', 'feat', '--from', 'nonexistent'],
+      join(tempDir, 'main'),
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('Could not resolve');
+  });
+
+  it('falls back to HEAD when origin is not configured', async () => {
+    const noRemoteDir = await createTempDir('wt-no-remote-');
+    await createBareRepo(noRemoteDir);
+
+    const result = await runWt(['co', '-b', 'fallback-branch'], join(noRemoteDir, 'main'));
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('branching from HEAD');
+
+    await rm(noRemoteDir, { recursive: true, force: true });
+  });
+
+  it('fails when --from is provided without a value', async () => {
+    const result = await runWt(['co', '-b', 'feat', '--from'], join(tempDir, 'main'));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('--from requires a branch name');
   });
 });

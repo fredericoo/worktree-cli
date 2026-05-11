@@ -59,9 +59,7 @@ async function promptForWorktree(self: CommandHandler, flags: string[]): Promise
     return 1;
   }
 
-  const { stderrSelect, stderrCancel, stderrLog, isCancel } = await import(
-    '../interactive.js'
-  );
+  const { stderrSelect, stderrCancel, stderrLog, isCancel } = await import('../interactive.js');
 
   const bareRoot = await getBareRoot();
   const entries = await getWorktreeEntries(bareRoot);
