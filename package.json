@@ -1,6 +1,6 @@
 {
   "name": "worktree-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Git worktree manager CLI — convert repos to bare, checkout worktrees, manage branches",
   "license": "MIT",
   "type": "module",
