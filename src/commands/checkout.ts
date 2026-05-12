@@ -18,6 +18,7 @@ import {
   getWorktreeEntries,
   fetchRef,
   refExists,
+  hasRemoteUrl,
 } from '../git';
 import { join, relative } from 'path';
 
@@ -30,7 +31,8 @@ If a worktree for the branch already exists, prints its path.
 If not, creates a new worktree and prints the path.
 
 Use -b to create a new branch. New branches are based off origin/main by default
-(fetched fresh). Use --from to base off a different remote branch.
+(fetched fresh). Use --from to base off a different branch. If no remote URL is
+configured, branches from HEAD (or a local branch with --from).
 
 Prints ONLY the worktree path to stdout for shell integration.
 With shell integration (wt init zsh), checkout auto-cd's into the worktree.`,
@@ -39,7 +41,7 @@ With shell integration (wt init zsh), checkout auto-cd's into the worktree.`,
     { flag: '-b', description: 'Create a new branch instead of checking out an existing one' },
     {
       flag: '--from <branch>',
-      description: 'Base the new branch off origin/<branch> (default: main, requires -b)',
+      description: 'Base the new branch off a different branch (default: origin/main, requires -b)',
     },
   ],
 
@@ -153,8 +155,8 @@ function parseCheckoutArgs(args: string[]): CheckoutArgs | { error: string } {
 }
 
 type StartPointResult =
-  | { resolved: true; startPoint: string }
-  | { resolved: false; fallback: true }
+  | { resolved: true; startPoint: string; note?: string }
+  | { resolved: false; fallback: true; reason: string }
   | { resolved: false; fallback: false; error: string };
 
 async function resolveStartPoint(
@@ -163,8 +165,21 @@ async function resolveStartPoint(
 ): Promise<StartPointResult> {
   const baseBranch = explicitFrom ?? 'main';
   const remote = 'origin';
-  const remoteRef = `${remote}/${baseBranch}`;
 
+  if (await hasRemoteUrl(remote, { cwd: bareRoot })) {
+    return resolveFromRemote(remote, baseBranch, explicitFrom, bareRoot);
+  }
+
+  return resolveWithoutRemote(explicitFrom, bareRoot);
+}
+
+async function resolveFromRemote(
+  remote: string,
+  baseBranch: string,
+  explicitFrom: string | undefined,
+  bareRoot: string,
+): Promise<StartPointResult> {
+  const remoteRef = `${remote}/${baseBranch}`;
   const fetched = await fetchRef(remote, baseBranch, { cwd: bareRoot });
 
   if (fetched && (await refExists(remoteRef, { cwd: bareRoot }))) {
@@ -179,7 +194,30 @@ async function resolveStartPoint(
     };
   }
 
-  return { resolved: false, fallback: true };
+  return { resolved: false, fallback: true, reason: 'Could not fetch origin/main, branching from HEAD' };
+}
+
+async function resolveWithoutRemote(
+  explicitFrom: string | undefined,
+  bareRoot: string,
+): Promise<StartPointResult> {
+  if (explicitFrom !== undefined) {
+    const localRef = `refs/heads/${explicitFrom}`;
+    if (await refExists(localRef, { cwd: bareRoot })) {
+      return {
+        resolved: true,
+        startPoint: explicitFrom,
+        note: `No remote URL configured, using local '${explicitFrom}' as start point`,
+      };
+    }
+    return {
+      resolved: false,
+      fallback: false,
+      error: `No remote URL configured and local branch '${explicitFrom}' does not exist`,
+    };
+  }
+
+  return { resolved: false, fallback: true, reason: 'No remote URL configured, branching from HEAD' };
 }
 
 async function createWorktree(
@@ -249,12 +287,13 @@ export const command: CommandHandler = {
 
       if (result.resolved) {
         startPoint = result.startPoint;
-        console.error(`Creating branch from ${result.startPoint}`);
+        const message = result.note ?? `Creating branch from ${result.startPoint}`;
+        console.error(message);
       } else if (!result.fallback) {
         console.error(`Error: ${result.error}`);
         return 1;
       } else {
-        console.error('Note: Could not fetch origin/main, branching from HEAD');
+        console.error(`Note: ${result.reason}`);
       }
     }
 

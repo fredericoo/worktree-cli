@@ -175,13 +175,56 @@ describe('wt checkout --from', () => {
     expect(result.stderr).toContain('Could not resolve');
   });
 
-  it('falls back to HEAD when origin is not configured', async () => {
+  it('falls back to HEAD when origin has no URL', async () => {
     const noRemoteDir = await createTempDir('wt-no-remote-');
     await createBareRepo(noRemoteDir);
 
     const result = await runWt(['co', '-b', 'fallback-branch'], join(noRemoteDir, 'main'));
     expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('No remote URL configured');
     expect(result.stderr).toContain('branching from HEAD');
+  });
+
+  it('uses local branch when --from is specified and no remote URL exists', async () => {
+    const noRemoteDir = await createTempDir('wt-no-remote-from-');
+    await createBareRepo(noRemoteDir);
+
+    const mainDir = join(noRemoteDir, 'main');
+    await Bun.spawn(['git', '-C', mainDir, 'branch', 'develop'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }).exited;
+
+    const result = await runWt(['co', '-b', 'feat', '--from', 'develop'], mainDir);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('No remote URL configured');
+    expect(result.stderr).toContain('develop');
+
+    await rm(noRemoteDir, { recursive: true, force: true });
+  });
+
+  it('fails when --from targets nonexistent local branch and no remote URL exists', async () => {
+    const noRemoteDir = await createTempDir('wt-no-remote-from-fail-');
+    await createBareRepo(noRemoteDir);
+
+    const result = await runWt(
+      ['co', '-b', 'feat', '--from', 'nonexistent'],
+      join(noRemoteDir, 'main'),
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('No remote URL configured');
+    expect(result.stderr).toContain('nonexistent');
+
+    await rm(noRemoteDir, { recursive: true, force: true });
+  });
+
+  it('does not leak git fatal errors when no remote URL is configured', async () => {
+    const noRemoteDir = await createTempDir('wt-no-remote-clean-');
+    await createBareRepo(noRemoteDir);
+
+    const result = await runWt(['co', '-b', 'clean-branch'], join(noRemoteDir, 'main'));
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain('fatal:');
 
     await rm(noRemoteDir, { recursive: true, force: true });
   });

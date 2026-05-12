@@ -189,6 +189,16 @@ export async function refExists(ref: string, options: { cwd?: string } = {}): Pr
   return result.exitCode === 0;
 }
 
+export async function hasRemoteUrl(
+  remote: string,
+  options: { cwd?: string } = {},
+): Promise<boolean> {
+  const result = await runGitSafe(['config', '--get', `remote.${remote}.url`], {
+    cwd: options.cwd,
+  });
+  return result.exitCode === 0 && result.stdout !== '';
+}
+
 export interface RemoveWorktreeOptions {
   force?: boolean;
   cwd?: string;

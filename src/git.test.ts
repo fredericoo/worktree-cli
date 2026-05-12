@@ -12,6 +12,7 @@ import {
   parseWorktreeList,
   fetchRef,
   refExists,
+  hasRemoteUrl,
 } from './git';
 import { createTempDir, createBareRepo, createBareRepoWithRemote } from './test-scaffold';
 
@@ -346,5 +347,37 @@ describe('refExists', () => {
   it('returns false for a nonexistent ref', async () => {
     const result = await refExists('origin/nonexistent', { cwd: join(tempDir, 'main') });
     expect(result).toBe(false);
+  });
+});
+
+describe('hasRemoteUrl', () => {
+  it('returns true when the remote has a URL configured', async () => {
+    const tempDir = await createTempDir('wt-hasremoteurl-');
+    await createBareRepoWithRemote(tempDir);
+
+    const result = await hasRemoteUrl('origin', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(true);
+
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns false when the remote has no URL (fetch refspec only)', async () => {
+    const tempDir = await createTempDir('wt-hasremoteurl-nourl-');
+    await createBareRepo(tempDir);
+
+    const result = await hasRemoteUrl('origin', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(false);
+
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns false when the remote does not exist at all', async () => {
+    const tempDir = await createTempDir('wt-hasremoteurl-none-');
+    await createBareRepo(tempDir);
+
+    const result = await hasRemoteUrl('upstream', { cwd: join(tempDir, 'main') });
+    expect(result).toBe(false);
+
+    await rm(tempDir, { recursive: true, force: true });
   });
 });
