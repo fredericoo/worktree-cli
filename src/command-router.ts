@@ -16,6 +16,7 @@ const COMMANDS: Record<string, () => Promise<CommandModule>> = {
   co: () => import('./commands/checkout'),
   remove: () => import('./commands/remove'),
   rm: () => import('./commands/remove'),
+  prune: () => import('./commands/prune'),
   list: () => import('./commands/list'),
   init: () => import('./commands/init'),
 };
@@ -60,6 +61,8 @@ ${bold('COMMANDS')}
       ${dim('Aliases: rm')}
       --force              Force removal even with uncommitted changes
       --delete-branch      Also delete the git branch
+
+    ${underline('prune')}                  Remove merged PR worktrees
 
     ${underline('list')}                   List all worktrees
 

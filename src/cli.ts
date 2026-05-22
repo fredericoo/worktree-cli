@@ -45,6 +45,7 @@ interface SelectableCommand {
 const SELECTABLE_COMMANDS: SelectableCommand[] = [
   { value: 'checkout', label: 'checkout (co)', hint: 'Create or switch to a worktree' },
   { value: 'remove', label: 'remove (rm)', hint: 'Remove a worktree' },
+  { value: 'prune', label: 'prune', hint: 'Remove merged PR worktrees' },
   { value: 'list', label: 'list', hint: 'List all worktrees' },
   { value: 'create', label: 'create', hint: 'Convert a repo to bare+worktree layout' },
 ];

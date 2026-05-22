@@ -14,6 +14,7 @@ cd my-repo && wt create
 wt co feature-branch    # creates worktree if needed, cd's into it
 wt co -b new-feature    # new branch + worktree
 wt rm old-branch        # clean up
+wt prune                # remove merged PR worktrees
 ```
 
 Each branch gets its own directory sharing a single `.bare/` git database.
@@ -80,6 +81,16 @@ wt rm feature-branch                    # remove worktree, keep branch
 wt rm feature-branch --delete-branch    # remove worktree + branch
 wt rm feature-branch --force            # force removal
 ```
+
+### `wt prune`
+
+Remove worktrees whose GitHub PR is merged and still points at the local HEAD:
+
+```bash
+wt prune
+```
+
+`wt prune` checks each worktree branch with the GitHub CLI. It only removes a worktree when the branch has an attached PR, the PR is merged, and the PR head SHA matches the worktree's current HEAD. GitHub checks are batched to avoid spamming the API.
 
 ### `wt list`
 

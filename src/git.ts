@@ -228,6 +228,10 @@ export async function listWorktrees(dir?: string): Promise<string> {
   return runGit(['worktree', 'list'], { cwd: dir });
 }
 
+export async function getHeadOid(dir?: string): Promise<string> {
+  return runGit(['rev-parse', 'HEAD'], { cwd: dir });
+}
+
 export interface WorktreeEntry {
   path: string;
   branch: string;
