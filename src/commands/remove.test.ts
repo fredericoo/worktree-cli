@@ -2,6 +2,62 @@ import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { stat, rm } from 'fs/promises';
 import { join } from 'path';
 import { createTempDir, createBareRepo, runWt } from '../test-scaffold';
+import { Effect, Layer } from 'effect';
+import type { WorktreeEntry } from '../git';
+import { Git, type GitService, Reporter, type ReporterService } from '../services';
+import { makeRemoveCommand } from './remove';
+
+const bareRoot = '/repo';
+const featureWorktree: WorktreeEntry = { path: '/repo/feature', branch: 'feature' };
+
+function makeTestCommand(
+  options: {
+    isBareRepo?: boolean;
+    entries?: WorktreeEntry[];
+    removeFailure?: Error;
+    deleteFailure?: Error;
+  } = {},
+) {
+  const stderr: string[] = [];
+  const removedWorktrees: Array<{ path: string; force: boolean }> = [];
+  const deletedBranches: string[] = [];
+
+  const git: GitService = {
+    isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    getBareRoot: Effect.succeed(bareRoot),
+    listWorktrees: () => Effect.fail(new Error('not needed')),
+    getWorktreeEntries: () => Effect.succeed(options.entries ?? [featureWorktree]),
+    getHeadOid: () => Effect.fail(new Error('not needed')),
+    removeWorktree: (worktreePath, _bareRoot, removeOptions = {}) =>
+      options.removeFailure !== undefined
+        ? Effect.fail(options.removeFailure)
+        : Effect.sync(() => {
+            removedWorktrees.push({ path: worktreePath, force: removeOptions.force === true });
+          }),
+    deleteBranch: (branch) =>
+      options.deleteFailure !== undefined
+        ? Effect.fail(options.deleteFailure)
+        : Effect.sync(() => {
+            deletedBranches.push(branch);
+          }),
+  };
+
+  const reporter: ReporterService = {
+    log: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStdout: () => Effect.sync(() => {}),
+    writeStderr: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+  };
+
+  const layer = Layer.mergeAll(Layer.succeed(Git, git), Layer.succeed(Reporter, reporter));
+
+  return { command: makeRemoveCommand(layer), deletedBranches, removedWorktrees, stderr };
+}
 
 describe('wt remove', () => {
   let tempDir: string;
@@ -82,5 +138,42 @@ describe('wt remove', () => {
   it('fails without a branch argument', async () => {
     const result = await runWt(['rm']);
     expect(result.exitCode).toBe(1);
+  });
+
+  it('removes an existing worktree through injected services', async () => {
+    const { command, removedWorktrees, stderr } = makeTestCommand();
+
+    const exitCode = await command.execute(['feature']);
+
+    expect(exitCode).toBe(0);
+    expect(removedWorktrees).toEqual([{ path: featureWorktree.path, force: false }]);
+    expect(stderr).toContain('Removed worktree: feature');
+  });
+
+  it('passes the force flag through injected services', async () => {
+    const { command, removedWorktrees } = makeTestCommand();
+
+    const exitCode = await command.execute(['--force', 'feature']);
+
+    expect(exitCode).toBe(0);
+    expect(removedWorktrees).toEqual([{ path: featureWorktree.path, force: true }]);
+  });
+
+  it('deletes the branch after removing the worktree when requested', async () => {
+    const { command, deletedBranches } = makeTestCommand();
+
+    const exitCode = await command.execute(['feature', '--delete-branch']);
+
+    expect(exitCode).toBe(0);
+    expect(deletedBranches).toEqual(['feature']);
+  });
+
+  it('returns an error when the branch has no worktree', async () => {
+    const { command, stderr } = makeTestCommand({ entries: [] });
+
+    const exitCode = await command.execute(['missing']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Error: No worktree found for branch 'missing'");
   });
 });

@@ -2,36 +2,23 @@
  * wt prune - Remove worktrees whose attached PR is merged at the local HEAD.
  */
 
-import { Duration, Effect, Schema } from 'effect';
+import { Duration, Effect, Layer } from 'effect';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
+import type { WorktreeEntry } from '../git';
 import {
-  getBareRoot,
-  getHeadOid,
-  getWorktreeEntries,
-  isBareRepo,
-  removeWorktree,
-  type WorktreeEntry,
-} from '../git';
+  Git,
+  Github,
+  liveCliLayer,
+  Reporter,
+  type CliServices,
+  type GitService,
+  type PullRequest,
+} from '../services';
 
 const GITHUB_CHECKS_PER_BATCH = 20;
 const GITHUB_CHECK_CONCURRENCY = 5;
 const GITHUB_BATCH_DELAY_MS = 60_000;
-
-const PullRequestSchema = Schema.Struct({
-  headRefOid: Schema.String,
-  state: Schema.String,
-  url: Schema.String,
-});
-const PullRequestsSchema = Schema.Array(PullRequestSchema);
-
-type PullRequest = Schema.Schema.Type<typeof PullRequestSchema>;
-
-interface GhResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
 
 type PruneCheck =
   | { kind: 'prune'; entry: WorktreeEntry; pullRequest: PullRequest }
@@ -61,11 +48,6 @@ commits after the PR was merged.`,
   ],
 };
 
-function toError(error: unknown): Error {
-  if (error instanceof Error) return error;
-  return new Error(String(error));
-}
-
 function chunkWorktrees(entries: WorktreeEntry[]): WorktreeEntry[][] {
   const chunks: WorktreeEntry[][] = [];
   for (let index = 0; index < entries.length; index += GITHUB_CHECKS_PER_BATCH) {
@@ -74,64 +56,12 @@ function chunkWorktrees(entries: WorktreeEntry[]): WorktreeEntry[][] {
   return chunks;
 }
 
-function runGh(args: string[], cwd: string): Effect.Effect<GhResult, Error> {
-  return Effect.tryPromise({
-    try: async () => {
-      const proc = Bun.spawn(['gh', ...args], { stdout: 'pipe', stderr: 'pipe', cwd });
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
-      const exitCode = await proc.exited;
-      return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
-    },
-    catch: toError,
-  });
-}
-
-function parsePullRequests(raw: string): Effect.Effect<ReadonlyArray<PullRequest>, Error> {
-  return Effect.try({
-    try: () => {
-      const parsed: unknown = JSON.parse(raw);
-      if (Schema.is(PullRequestsSchema)(parsed)) return parsed;
-      throw new Error('GitHub returned an unexpected PR payload');
-    },
-    catch: toError,
-  });
-}
-
-function getPullRequest(entry: WorktreeEntry): Effect.Effect<PullRequest | null, Error> {
+function checkWorktree(entry: WorktreeEntry): Effect.Effect<PruneCheck, Error, Git | Github> {
   return Effect.gen(function* () {
-    const result = yield* runGh(
-      [
-        'pr',
-        'list',
-        '--head',
-        entry.branch,
-        '--state',
-        'all',
-        '--limit',
-        '1',
-        '--json',
-        'headRefOid,state,url',
-      ],
-      entry.path,
-    );
-
-    if (result.exitCode !== 0) {
-      throw new Error(`gh pr list failed for ${entry.branch}: ${result.stderr}`);
-    }
-
-    const pullRequests = yield* parsePullRequests(result.stdout);
-    return pullRequests[0] ?? null;
-  });
-}
-
-function checkWorktree(entry: WorktreeEntry): Effect.Effect<PruneCheck, Error> {
-  return Effect.gen(function* () {
-    const localHeadOid = yield* Effect.tryPromise({
-      try: () => getHeadOid(entry.path),
-      catch: toError,
-    });
-    const pullRequest = yield* getPullRequest(entry);
+    const git = yield* Git;
+    const github = yield* Github;
+    const localHeadOid = yield* git.getHeadOid(entry.path);
+    const pullRequest = yield* github.getPullRequest(entry);
 
     if (pullRequest === null) {
       return { kind: 'keep', entry, reason: 'no PR found' };
@@ -149,11 +79,22 @@ function checkWorktree(entry: WorktreeEntry): Effect.Effect<PruneCheck, Error> {
   });
 }
 
-function checkWorktreeBatch(batch: WorktreeEntry[]): Effect.Effect<PruneCheck[], Error> {
+function checkWorktreeBatch(
+  batch: WorktreeEntry[],
+): Effect.Effect<PruneCheck[], Error, Git | Github> {
   return Effect.forEach(batch, checkWorktree, { concurrency: GITHUB_CHECK_CONCURRENCY });
 }
 
-function checkAllWorktrees(entries: WorktreeEntry[]): Effect.Effect<PruneCheck[], Error> {
+function log(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.log(message);
+  });
+}
+
+function checkAllWorktrees(
+  entries: WorktreeEntry[],
+): Effect.Effect<PruneCheck[], Error, CliServices> {
   return Effect.gen(function* () {
     const batches = chunkWorktrees(entries);
     const checks: PruneCheck[] = [];
@@ -161,18 +102,14 @@ function checkAllWorktrees(entries: WorktreeEntry[]): Effect.Effect<PruneCheck[]
     for (const [index, batch] of batches.entries()) {
       const batchNumber = index + 1;
       if (batches.length > 1) {
-        yield* Effect.sync(() => {
-          console.error(`Checking GitHub batch ${batchNumber}/${batches.length}...`);
-        });
+        yield* log(`Checking GitHub batch ${batchNumber}/${batches.length}...`);
       }
 
       const batchChecks = yield* checkWorktreeBatch(batch);
       checks.push(...batchChecks);
 
       if (batchNumber < batches.length) {
-        yield* Effect.sync(() => {
-          console.error('Waiting before the next GitHub batch to avoid API spam...');
-        });
+        yield* log('Waiting before the next GitHub batch to avoid API spam...');
         yield* Effect.sleep(Duration.millis(GITHUB_BATCH_DELAY_MS));
       }
     }
@@ -181,78 +118,97 @@ function checkAllWorktrees(entries: WorktreeEntry[]): Effect.Effect<PruneCheck[]
   });
 }
 
-async function removePrunedWorktrees(
+function removePrunedWorktrees(
   bareRoot: string,
   checks: PruneCheck[],
-): Promise<RemovalResult[]> {
-  const results: RemovalResult[] = [];
+): Effect.Effect<RemovalResult[], never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const results: RemovalResult[] = [];
 
-  for (const check of checks) {
-    if (check.kind === 'keep') {
-      console.error(`Kept ${check.entry.branch}: ${check.reason}`);
-      results.push({ entry: check.entry, status: 'kept' });
-      continue;
+    for (const check of checks) {
+      if (check.kind === 'keep') {
+        yield* log(`Kept ${check.entry.branch}: ${check.reason}`);
+        results.push({ entry: check.entry, status: 'kept' });
+        continue;
+      }
+
+      const result = yield* removeWorktreeForCheck(git, bareRoot, check);
+      results.push(result);
     }
 
-    try {
-      console.error(`Removing ${check.entry.branch}: merged PR ${check.pullRequest.url}`);
-      await removeWorktree(check.entry.path, { cwd: bareRoot });
-      console.error(`Removed worktree: ${check.entry.branch}`);
-      results.push({ entry: check.entry, status: 'removed' });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Failed to remove ${check.entry.branch}: ${message}`);
-      results.push({ entry: check.entry, status: 'failed' });
-    }
-  }
-
-  return results;
+    return results;
+  });
 }
 
-function printSummary(results: RemovalResult[]): void {
+function removeWorktreeForCheck(
+  git: GitService,
+  bareRoot: string,
+  check: Extract<PruneCheck, { kind: 'prune' }>,
+): Effect.Effect<RemovalResult, never, Reporter> {
+  return Effect.gen(function* () {
+    yield* log(`Removing ${check.entry.branch}: merged PR ${check.pullRequest.url}`);
+
+    const removed = yield* Effect.either(git.removeWorktree(check.entry.path, bareRoot));
+    if (removed._tag === 'Right') {
+      yield* log(`Removed worktree: ${check.entry.branch}`);
+      return { entry: check.entry, status: 'removed' };
+    }
+
+    yield* log(`Failed to remove ${check.entry.branch}: ${removed.left.message}`);
+    return { entry: check.entry, status: 'failed' };
+  });
+}
+
+function summarize(results: RemovalResult[]): string {
   const removedCount = results.filter((result) => result.status === 'removed').length;
   const failedCount = results.filter((result) => result.status === 'failed').length;
   const keptCount = results.length - removedCount - failedCount;
-  console.error(
-    `Prune complete: removed ${removedCount}, kept ${keptCount}, failed ${failedCount}.`,
-  );
+  return `Prune complete: removed ${removedCount}, kept ${keptCount}, failed ${failedCount}.`;
 }
 
 function hasFailedRemoval(results: RemovalResult[]): boolean {
   return results.some((result) => result.status === 'failed');
 }
 
-export const command: CommandHandler = {
-  name: 'prune',
-  description: 'Remove merged PR worktrees',
-  getHelp: () => HELP,
+export function pruneProgram(): Effect.Effect<number, Error, CliServices> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
 
-  async execute(_args: string[]): Promise<number> {
-    if (!(await isBareRepo())) {
-      console.error(
-        'Error: Not in a bare repo. wt prune only works with bare repo worktree setups.',
-      );
+    if (!(yield* git.isBareRepo)) {
+      yield* log('Error: Not in a bare repo. wt prune only works with bare repo worktree setups.');
       return 1;
     }
 
-    const bareRoot = await getBareRoot();
-    const entries = await getWorktreeEntries(bareRoot);
+    const bareRoot = yield* git.getBareRoot;
+    const entries = yield* git.getWorktreeEntries(bareRoot);
 
     if (entries.length === 0) {
-      console.error('No worktrees to prune.');
+      yield* log('No worktrees to prune.');
       return 0;
     }
 
-    console.error(`Pruning ${entries.length} worktrees...`);
-    console.error(
+    yield* log(`Pruning ${entries.length} worktrees...`);
+    yield* log(
       `Checking GitHub PRs in batches of ${GITHUB_CHECKS_PER_BATCH} ` +
         `with ${GITHUB_CHECK_CONCURRENCY} concurrent checks.`,
     );
 
-    const checks = await Effect.runPromise(checkAllWorktrees(entries));
-    const removals = await removePrunedWorktrees(bareRoot, checks);
-    printSummary(removals);
+    const checks = yield* checkAllWorktrees(entries);
+    const removals = yield* removePrunedWorktrees(bareRoot, checks);
+    yield* log(summarize(removals));
 
     return hasFailedRemoval(removals) ? 1 : 0;
-  },
-};
+  });
+}
+
+export function makePruneCommand(layer: Layer.Layer<CliServices>): CommandHandler {
+  return {
+    name: 'prune',
+    description: 'Remove merged PR worktrees',
+    getHelp: () => HELP,
+    execute: () => Effect.runPromise(Effect.provide(pruneProgram(), layer)),
+  };
+}
+
+export const command: CommandHandler = makePruneCommand(liveCliLayer());

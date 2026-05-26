@@ -2,18 +2,15 @@
  * wt remove / wt rm - Remove a worktree and optionally its branch.
  */
 
+import { Effect, Layer } from 'effect';
+import { relative } from 'path';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import {
-  isBareRepo,
-  getBareRoot,
-  findWorktreeByBranch,
-  removeWorktree,
-  deleteBranch,
-  getWorktreeEntries,
-} from '../git';
-import { relative } from 'path';
+import { getBareRoot, getWorktreeEntries, isBareRepo } from '../git';
+import { Git, liveGitReporterLayer, Reporter } from '../services';
+
+type RemoveServices = Git | Reporter;
 
 const HELP: CommandHelp = {
   name: 'wt remove',
@@ -47,8 +44,30 @@ regardless of where the worktree directory lives on disk.`,
 
 const FLAG_NAMES = new Set(['--force', '-f', '--delete-branch']);
 
+interface RemoveOptions {
+  force: boolean;
+  shouldDeleteBranch: boolean;
+  branch: string | undefined;
+}
+
+function parseArgs(args: string[]): RemoveOptions {
+  const positionalArgs = args.filter((arg) => !FLAG_NAMES.has(arg));
+  return {
+    force: args.includes('--force') || args.includes('-f'),
+    shouldDeleteBranch: args.includes('--delete-branch'),
+    branch: positionalArgs[0],
+  };
+}
+
 function extractFlags(args: string[]): string[] {
   return args.filter((arg) => FLAG_NAMES.has(arg));
+}
+
+function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.writeStderr(message);
+  });
 }
 
 async function promptForWorktree(self: CommandHandler, flags: string[]): Promise<number> {
@@ -89,63 +108,130 @@ async function promptForWorktree(self: CommandHandler, flags: string[]): Promise
   return self.execute([...flags, selected]);
 }
 
-export const command: CommandHandler = {
-  name: 'remove',
-  description: 'Remove a worktree',
-  getHelp: () => HELP,
+function validateBareRepo(git: import('../services').GitService): Effect.Effect<boolean, never> {
+  return Effect.gen(function* () {
+    const bareRepo = yield* Effect.either(git.isBareRepo);
+    return bareRepo._tag === 'Right' && bareRepo.right;
+  });
+}
 
-  async execute(args: string[]): Promise<number> {
-    const force = args.includes('--force') || args.includes('-f');
-    const shouldDeleteBranch = args.includes('--delete-branch');
-    const positionalArgs = args.filter(
-      (arg) => arg !== '--force' && arg !== '-f' && arg !== '--delete-branch',
-    );
+function findWorktreePath(
+  bareRoot: string,
+  branch: string,
+): Effect.Effect<string | null, Error, Git> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const entries = yield* git.getWorktreeEntries(bareRoot);
+    const match = entries.find((entry) => entry.branch === branch);
+    return match?.path ?? null;
+  });
+}
 
-    const branch = positionalArgs[0];
+function removeBranchWorktree(
+  bareRoot: string,
+  branch: string,
+  force: boolean,
+): Effect.Effect<boolean, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const worktreePath = yield* Effect.either(findWorktreePath(bareRoot, branch));
 
-    if (branch === undefined || branch === '') {
-      if (process.stdin.isTTY !== true) {
-        printCommandUsage(HELP);
-        return 1;
-      }
-      return promptForWorktree(this, extractFlags(args));
+    if (worktreePath._tag === 'Left') {
+      yield* writeStderr(`Error: ${worktreePath.left.message}`);
+      return false;
     }
 
-    if (!(await isBareRepo())) {
-      console.error(
+    if (worktreePath.right === null) {
+      yield* writeStderr(`Error: No worktree found for branch '${branch}'`);
+      return false;
+    }
+
+    const removed = yield* Effect.either(
+      git.removeWorktree(worktreePath.right, bareRoot, { force }),
+    );
+    if (removed._tag === 'Left') {
+      yield* writeStderr(`Error removing worktree: ${removed.left.message}`);
+      return false;
+    }
+
+    yield* writeStderr(`Removed worktree: ${branch}`);
+    return true;
+  });
+}
+
+function deleteRemovedBranch(
+  bareRoot: string,
+  branch: string,
+): Effect.Effect<boolean, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const deleted = yield* Effect.either(git.deleteBranch(branch, bareRoot));
+
+    if (deleted._tag === 'Right') {
+      yield* writeStderr(`Deleted branch: ${branch}`);
+      return true;
+    }
+
+    yield* writeStderr(
+      `Warning: worktree removed but branch deletion failed: ${deleted.left.message}`,
+    );
+    return false;
+  });
+}
+
+export function removeProgram(
+  options: RemoveOptions,
+): Effect.Effect<number, never, RemoveServices> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+
+    if (!(yield* validateBareRepo(git))) {
+      yield* writeStderr(
         'Error: Not in a bare repo. wt remove only works with bare repo worktree setups.',
       );
       return 1;
     }
 
-    const bareRoot = await getBareRoot();
-
-    const worktreePath = await findWorktreeByBranch(branch, bareRoot);
-    if (worktreePath === null) {
-      console.error(`Error: No worktree found for branch '${branch}'`);
+    const bareRoot = yield* Effect.either(git.getBareRoot);
+    if (bareRoot._tag === 'Left') {
+      yield* writeStderr(`Error: ${bareRoot.left.message}`);
       return 1;
     }
 
-    try {
-      await removeWorktree(worktreePath, { force, cwd: bareRoot });
-      console.error(`Removed worktree: ${branch}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Error removing worktree: ${message}`);
-      return 1;
-    }
+    const removed = yield* removeBranchWorktree(
+      bareRoot.right,
+      options.branch ?? '',
+      options.force,
+    );
+    if (!removed) return 1;
 
-    if (shouldDeleteBranch) {
-      try {
-        await deleteBranch(branch, bareRoot);
-        console.error(`Deleted branch: ${branch}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`Warning: worktree removed but branch deletion failed: ${message}`);
-        return 1;
+    if (!options.shouldDeleteBranch) return 0;
+
+    const deleted = yield* deleteRemovedBranch(bareRoot.right, options.branch ?? '');
+    return deleted ? 0 : 1;
+  });
+}
+
+export function makeRemoveCommand(layer: Layer.Layer<RemoveServices>): CommandHandler {
+  return {
+    name: 'remove',
+    description: 'Remove a worktree',
+    getHelp: () => HELP,
+
+    async execute(args: string[]): Promise<number> {
+      const options = parseArgs(args);
+
+      if (options.branch === undefined || options.branch === '') {
+        if (process.stdin.isTTY !== true) {
+          printCommandUsage(HELP);
+          return 1;
+        }
+        return promptForWorktree(this, extractFlags(args));
       }
-    }
 
-    return 0;
-  },
-};
+      return Effect.runPromise(Effect.provide(removeProgram(options), layer));
+    },
+  };
+}
+
+export const command: CommandHandler = makeRemoveCommand(liveGitReporterLayer());
