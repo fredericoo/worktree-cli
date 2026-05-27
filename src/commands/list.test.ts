@@ -18,7 +18,12 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
         ? Effect.fail(options.failure)
         : Effect.succeed(options.output ?? '/repo/main abc123 [main]'),
     getWorktreeEntries: () => Effect.fail(new Error('not needed')),
+    findWorktreeByBranch: () => Effect.fail(new Error('not needed')),
     getHeadOid: () => Effect.fail(new Error('not needed')),
+    addWorktree: () => Effect.fail(new Error('not needed')),
+    hasRemoteUrl: () => Effect.fail(new Error('not needed')),
+    fetchRef: () => Effect.fail(new Error('not needed')),
+    refExists: () => Effect.fail(new Error('not needed')),
     removeWorktree: () => Effect.fail(new Error('not needed')),
     deleteBranch: () => Effect.fail(new Error('not needed')),
   };

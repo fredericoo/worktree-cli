@@ -46,7 +46,12 @@ function makeTestServices(options: TestServiceOptions = {}): TestServices {
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
     getWorktreeEntries: () => Effect.succeed(entries),
+    findWorktreeByBranch: () => Effect.fail(new Error('not needed')),
     getHeadOid: (worktreePath) => Effect.succeed(heads[worktreePath] ?? 'local-head'),
+    addWorktree: () => Effect.fail(new Error('not needed')),
+    hasRemoteUrl: () => Effect.fail(new Error('not needed')),
+    fetchRef: () => Effect.fail(new Error('not needed')),
+    refExists: () => Effect.fail(new Error('not needed')),
     removeWorktree: (worktreePath) =>
       failingRemovals.has(worktreePath)
         ? Effect.fail(new Error('worktree contains uncommitted changes'))

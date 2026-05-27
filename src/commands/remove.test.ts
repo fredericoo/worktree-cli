@@ -27,7 +27,12 @@ function makeTestCommand(
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
     getWorktreeEntries: () => Effect.succeed(options.entries ?? [featureWorktree]),
+    findWorktreeByBranch: () => Effect.fail(new Error('not needed')),
     getHeadOid: () => Effect.fail(new Error('not needed')),
+    addWorktree: () => Effect.fail(new Error('not needed')),
+    hasRemoteUrl: () => Effect.fail(new Error('not needed')),
+    fetchRef: () => Effect.fail(new Error('not needed')),
+    refExists: () => Effect.fail(new Error('not needed')),
     removeWorktree: (worktreePath, _bareRoot, removeOptions = {}) =>
       options.removeFailure !== undefined
         ? Effect.fail(options.removeFailure)

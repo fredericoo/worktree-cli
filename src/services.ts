@@ -3,10 +3,16 @@ import {
   getBareRoot,
   getHeadOid,
   getWorktreeEntries,
+  addWorktree,
+  fetchRef,
+  refExists,
+  hasRemoteUrl,
+  findWorktreeByBranch,
   isBareRepo,
   listWorktrees,
   removeWorktree,
   deleteBranch,
+  type AddWorktreeOptions,
   type WorktreeEntry,
 } from './git';
 
@@ -30,7 +36,23 @@ export interface GitService {
   readonly getBareRoot: Effect.Effect<string, Error>;
   readonly listWorktrees: () => Effect.Effect<string, Error>;
   readonly getWorktreeEntries: (bareRoot: string) => Effect.Effect<WorktreeEntry[], Error>;
+  readonly findWorktreeByBranch: (
+    branch: string,
+    bareRoot: string,
+  ) => Effect.Effect<string | null, Error>;
   readonly getHeadOid: (worktreePath: string) => Effect.Effect<string, Error>;
+  readonly addWorktree: (
+    worktreePath: string,
+    branch: string,
+    options: AddWorktreeOptions,
+  ) => Effect.Effect<void, Error>;
+  readonly hasRemoteUrl: (remote: string, bareRoot: string) => Effect.Effect<boolean, Error>;
+  readonly fetchRef: (
+    remote: string,
+    ref: string,
+    bareRoot: string,
+  ) => Effect.Effect<boolean, Error>;
+  readonly refExists: (ref: string, bareRoot: string) => Effect.Effect<boolean, Error>;
   readonly removeWorktree: (
     worktreePath: string,
     bareRoot: string,
@@ -93,7 +115,15 @@ function makeGitService(): GitService {
     getBareRoot: fromPromise(() => getBareRoot()),
     listWorktrees: () => fromPromise(() => listWorktrees()),
     getWorktreeEntries: (bareRoot) => fromPromise(() => getWorktreeEntries(bareRoot)),
+    findWorktreeByBranch: (branch, bareRoot) =>
+      fromPromise(() => findWorktreeByBranch(branch, bareRoot)),
     getHeadOid: (worktreePath) => fromPromise(() => getHeadOid(worktreePath)),
+    addWorktree: (worktreePath, branch, options) =>
+      fromPromise(() => addWorktree(worktreePath, branch, options)),
+    hasRemoteUrl: (remote, bareRoot) => fromPromise(() => hasRemoteUrl(remote, { cwd: bareRoot })),
+    fetchRef: (remote, ref, bareRoot) =>
+      fromPromise(() => fetchRef(remote, ref, { cwd: bareRoot })),
+    refExists: (ref, bareRoot) => fromPromise(() => refExists(ref, { cwd: bareRoot })),
     removeWorktree: (worktreePath, bareRoot, options = {}) =>
       fromPromise(() => {
         const removeOptions =

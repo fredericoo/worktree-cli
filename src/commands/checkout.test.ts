@@ -2,6 +2,72 @@ import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { stat, rm } from 'fs/promises';
 import { join } from 'path';
 import { createTempDir, createBareRepo, createBareRepoWithRemote, runWt } from '../test-scaffold';
+import { Effect, Layer } from 'effect';
+import { Git, type GitService, Reporter, type ReporterService } from '../services';
+import { makeCheckoutCommand } from './checkout';
+
+const bareRoot = '/repo';
+
+function makeTestCommand(
+  options: {
+    isBareRepo?: boolean;
+    existingPath?: string | null;
+    hasRemote?: boolean;
+    fetched?: boolean;
+    refs?: Set<string>;
+  } = {},
+) {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const addedWorktrees: Array<{
+    path: string;
+    branch: string;
+    createBranch: boolean;
+    startPoint: string | undefined;
+  }> = [];
+
+  const git: GitService = {
+    isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    getBareRoot: Effect.succeed(bareRoot),
+    listWorktrees: () => Effect.fail(new Error('not needed')),
+    getWorktreeEntries: () => Effect.fail(new Error('not needed')),
+    findWorktreeByBranch: () => Effect.succeed(options.existingPath ?? null),
+    getHeadOid: () => Effect.fail(new Error('not needed')),
+    addWorktree: (worktreePath, branch, addOptions) =>
+      Effect.sync(() => {
+        addedWorktrees.push({
+          path: worktreePath,
+          branch,
+          createBranch: addOptions.createBranch === true,
+          startPoint: addOptions.startPoint,
+        });
+      }),
+    hasRemoteUrl: () => Effect.succeed(options.hasRemote ?? false),
+    fetchRef: () => Effect.succeed(options.fetched ?? false),
+    refExists: (ref) => Effect.succeed(options.refs?.has(ref) ?? false),
+    removeWorktree: () => Effect.fail(new Error('not needed')),
+    deleteBranch: () => Effect.fail(new Error('not needed')),
+  };
+
+  const reporter: ReporterService = {
+    log: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStdout: (message) =>
+      Effect.sync(() => {
+        stdout.push(message);
+      }),
+    writeStderr: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+  };
+
+  const layer = Layer.mergeAll(Layer.succeed(Git, git), Layer.succeed(Reporter, reporter));
+
+  return { addedWorktrees, command: makeCheckoutCommand(layer), stderr, stdout };
+}
 
 describe('wt checkout', () => {
   let tempDir: string;
@@ -104,6 +170,51 @@ describe('wt checkout', () => {
     const lines = result.stdout.split('\n');
     expect(lines.length).toBe(1);
     expect(result.stdout).toMatch(/^\//);
+  });
+
+  it('returns an existing worktree path through injected services', async () => {
+    const { command, stdout, stderr, addedWorktrees } = makeTestCommand({
+      existingPath: '/repo/existing-feature',
+    });
+
+    const exitCode = await command.execute(['existing-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/existing-feature']);
+    expect(stderr).toEqual([]);
+    expect(addedWorktrees).toEqual([]);
+  });
+
+  it('creates a branch from origin main through injected services', async () => {
+    const { command, stdout, stderr, addedWorktrees } = makeTestCommand({
+      hasRemote: true,
+      fetched: true,
+      refs: new Set(['origin/main']),
+    });
+
+    const exitCode = await command.execute(['-b', 'new-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/new-feature']);
+    expect(stderr).toContain('Creating branch from origin/main');
+    expect(addedWorktrees).toEqual([
+      {
+        path: '/repo/new-feature',
+        branch: 'new-feature',
+        createBranch: true,
+        startPoint: 'origin/main',
+      },
+    ]);
+  });
+
+  it('falls back to HEAD when no remote is configured through injected services', async () => {
+    const { command, stderr, addedWorktrees } = makeTestCommand();
+
+    const exitCode = await command.execute(['-b', 'fallback-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain('Note: No remote URL configured, branching from HEAD');
+    expect(addedWorktrees[0]?.startPoint).toBeUndefined();
   });
 });
 
