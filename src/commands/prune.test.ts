@@ -42,7 +42,11 @@ function makeTestServices(options: TestServiceOptions = {}): TestServices {
   const failingRemovals = options.failingRemovals ?? new Set<string>();
 
   const git: GitService = {
+    isStandardGitRepo: () => Effect.fail(new Error('not needed')),
     isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    hasUncommittedChanges: () => Effect.fail(new Error('not needed')),
+    getDefaultBranch: () => Effect.fail(new Error('not needed')),
+    getUntrackedFiles: () => Effect.fail(new Error('not needed')),
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
     getWorktreeEntries: () => Effect.succeed(entries),
@@ -59,6 +63,7 @@ function makeTestServices(options: TestServiceOptions = {}): TestServices {
             removedWorktrees.push(worktreePath);
           }),
     deleteBranch: () => Effect.fail(new Error('not needed')),
+    setConfig: () => Effect.fail(new Error('not needed')),
   };
 
   const github: GithubService = {

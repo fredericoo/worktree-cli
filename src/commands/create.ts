@@ -4,174 +4,11 @@
  * with added rollback on partial failure.
  */
 
+import { Effect, Layer } from 'effect';
+import { dirname, join, resolve } from 'path';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
-import {
-  isStandardGitRepo,
-  hasUncommittedChanges,
-  getDefaultBranch,
-  getUntrackedFiles,
-  addWorktree,
-  setConfig,
-} from '../git';
-import { resolve, join, dirname } from 'path';
-import { readdir, rename, stat, mkdir, rm, mkdtemp } from 'fs/promises';
-
-/**
- * Temp dir is created INSIDE the repo to avoid EXDEV (cross-device rename)
- * errors on Linux where /tmp may be a different filesystem.
- */
-async function moveWorkingFiles(repoDir: string): Promise<string> {
-  const tempDir = await mkdtemp(join(repoDir, '.wt-staging-'));
-  const entries = await readdir(repoDir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (entry.name === '.bare' || entry.name === '.git') continue;
-    if (entry.name.startsWith('.wt-staging-')) continue;
-    await rename(join(repoDir, entry.name), join(tempDir, entry.name));
-  }
-
-  return tempDir;
-}
-
-async function restoreUntrackedFiles(
-  tempDir: string,
-  mainDir: string,
-  untrackedFiles: string[],
-): Promise<void> {
-  for (const file of untrackedFiles) {
-    const srcPath = join(tempDir, file);
-    try {
-      await stat(srcPath);
-    } catch {
-      continue;
-    }
-    const destDir = dirname(join(mainDir, file));
-    await mkdir(destDir, { recursive: true });
-    await rename(srcPath, join(mainDir, file));
-  }
-}
-
-async function restoreFromTemp(repoDir: string, tempDir: string): Promise<void> {
-  try {
-    const entries = await readdir(tempDir);
-    for (const entry of entries) {
-      const destPath = join(repoDir, entry);
-      const destExists = await stat(destPath)
-        .then(() => true)
-        .catch(() => false);
-      if (!destExists) {
-        await rename(join(tempDir, entry), destPath);
-      }
-    }
-    await rm(tempDir, { recursive: true, force: true });
-  } catch {
-    console.error(`  Temp files may remain at: ${tempDir}`);
-  }
-}
-
-async function rollback(repoDir: string, tempDir: string | null): Promise<void> {
-  const bareDir = join(repoDir, '.bare');
-  const gitPath = join(repoDir, '.git');
-
-  try {
-    const gitInfo = await stat(gitPath);
-    const bareExists = await stat(bareDir)
-      .then(() => true)
-      .catch(() => false);
-
-    if (gitInfo.isFile() && bareExists) {
-      await rm(gitPath);
-      await rename(bareDir, gitPath);
-      // Reverse the core.bare config change now that .git is restored
-      await setConfig('core.bare', 'false', repoDir);
-    }
-  } catch {
-    // .git doesn't exist or other issue — can't recover further
-  }
-
-  if (tempDir !== null) {
-    await restoreFromTemp(repoDir, tempDir);
-  }
-}
-
-async function doCreate(dir: string): Promise<number> {
-  const repoDir = resolve(dir);
-
-  if (!(await isStandardGitRepo(repoDir))) {
-    console.error('Error: No .git directory. Is this a standard git repo?');
-    return 1;
-  }
-
-  if (await hasUncommittedChanges(repoDir)) {
-    console.error('Error: You have uncommitted changes.');
-    console.error('Commit or stash them first.');
-    return 1;
-  }
-
-  const { branch: targetBranch, isDefault } = await getDefaultBranch(repoDir);
-  if (!isDefault) {
-    console.error(`Note: No main/master branch. Using '${targetBranch}'.`);
-  }
-
-  const untrackedFiles = await getUntrackedFiles(repoDir);
-
-  console.error('Converting to bare repo structure...');
-  console.error(`  Target branch: ${targetBranch}`);
-  console.error('');
-
-  let tempDir: string | null = null;
-
-  const onInterrupt = (): void => {
-    console.error('\nInterrupted! Attempting rollback...');
-    void rollback(repoDir, tempDir).finally(() => process.exit(1));
-  };
-  process.on('SIGINT', onInterrupt);
-  process.on('SIGTERM', onInterrupt);
-
-  try {
-    await rename(join(repoDir, '.git'), join(repoDir, '.bare'));
-    await Bun.write(join(repoDir, '.git'), 'gitdir: .bare\n');
-    await setConfig('core.bare', 'true', repoDir);
-    await setConfig('remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*', repoDir);
-
-    tempDir = await moveWorkingFiles(repoDir);
-    console.error(`  Staging files in: ${tempDir}`);
-
-    await addWorktree(join(repoDir, 'main'), targetBranch, { cwd: repoDir });
-
-    if (untrackedFiles.length > 0) {
-      console.error('  Restoring untracked files...');
-      await restoreUntrackedFiles(tempDir, join(repoDir, 'main'), untrackedFiles);
-    }
-
-    await rm(tempDir, { recursive: true, force: true });
-    tempDir = null;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`\nError during conversion: ${message}`);
-    console.error('Attempting rollback...');
-    await rollback(repoDir, tempDir);
-    console.error('Rollback complete. Repository should be in its original state.');
-    return 1;
-  } finally {
-    process.removeListener('SIGINT', onInterrupt);
-    process.removeListener('SIGTERM', onInterrupt);
-  }
-
-  console.error('');
-  console.error('Done! New structure:');
-  console.error('');
-  console.error(`  ${repoDir}/`);
-  console.error('  +-- .bare/     <- git database (shared)');
-  console.error('  +-- .git       <- pointer to .bare');
-  console.error(`  +-- main/      <- worktree on '${targetBranch}'`);
-  console.error('');
-  console.error('Next steps:');
-  console.error('  cd main        # start working');
-  console.error('  wt co branch   # add more worktrees');
-  return 0;
-}
+import { FileSystem, Git, liveCreateLayer, Reporter, type CreateServices } from '../services';
 
 const HELP: CommandHelp = {
   name: 'wt create',
@@ -200,17 +37,275 @@ The directory argument defaults to the current directory.`,
   ],
 };
 
-export const command: CommandHandler = {
-  name: 'create',
-  description: 'Convert a standard git repo to bare+worktree layout',
-  getHelp: () => HELP,
+function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.writeStderr(message);
+  });
+}
 
-  async execute(args: string[]): Promise<number> {
-    if (args.includes('--help') || args.includes('-h')) {
-      return 0;
+function shouldMoveEntry(name: string): boolean {
+  if (name === '.bare' || name === '.git') return false;
+  return !name.startsWith('.wt-staging-');
+}
+
+function moveWorkingFiles(repoDir: string): Effect.Effect<string, Error, FileSystem> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem;
+    const tempDir = yield* fs.makeTempDir(repoDir, '.wt-staging-');
+    const entries = yield* fs.readDir(repoDir);
+
+    for (const entry of entries) {
+      if (!shouldMoveEntry(entry.name)) continue;
+      yield* fs.rename(join(repoDir, entry.name), join(tempDir, entry.name));
     }
 
-    const dir = args[0] ?? '.';
-    return doCreate(dir);
-  },
-};
+    return tempDir;
+  });
+}
+
+function restoreUntrackedFiles(
+  tempDir: string,
+  mainDir: string,
+  untrackedFiles: string[],
+): Effect.Effect<void, Error, FileSystem> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem;
+
+    for (const file of untrackedFiles) {
+      const srcPath = join(tempDir, file);
+      if (!(yield* fs.exists(srcPath))) continue;
+
+      const destPath = join(mainDir, file);
+      yield* fs.makeDir(dirname(destPath));
+      yield* fs.rename(srcPath, destPath);
+    }
+  });
+}
+
+function restoreFromTemp(
+  repoDir: string,
+  tempDir: string,
+): Effect.Effect<void, never, FileSystem | Reporter> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem;
+    const restored = yield* Effect.either(
+      Effect.gen(function* () {
+        const entries = yield* fs.readDir(tempDir);
+        for (const entry of entries) {
+          const destPath = join(repoDir, entry.name);
+          if (yield* fs.exists(destPath)) continue;
+          yield* fs.rename(join(tempDir, entry.name), destPath);
+        }
+        yield* fs.remove(tempDir);
+      }),
+    );
+
+    if (restored._tag === 'Left') {
+      yield* writeStderr(`  Temp files may remain at: ${tempDir}`);
+    }
+  });
+}
+
+function rollback(
+  repoDir: string,
+  tempDir: string | null,
+): Effect.Effect<void, never, CreateServices> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem;
+    const git = yield* Git;
+    const bareDir = join(repoDir, '.bare');
+    const gitPath = join(repoDir, '.git');
+
+    const restoredGit = yield* Effect.either(
+      Effect.gen(function* () {
+        const gitPathIsFile = yield* fs.isFile(gitPath);
+        const bareExists = yield* fs.exists(bareDir);
+        if (!gitPathIsFile || !bareExists) return;
+
+        yield* fs.remove(gitPath);
+        yield* fs.rename(bareDir, gitPath);
+        yield* git.setConfig('core.bare', 'false', repoDir);
+      }),
+    );
+
+    if (restoredGit._tag === 'Left') {
+      // Rollback is best effort; restoring moved files below is still useful.
+    }
+
+    if (tempDir !== null) {
+      yield* restoreFromTemp(repoDir, tempDir);
+    }
+  });
+}
+
+function validateRepo(repoDir: string): Effect.Effect<boolean, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+
+    const standardRepo = yield* Effect.either(git.isStandardGitRepo(repoDir));
+    if (standardRepo._tag === 'Left' || !standardRepo.right) {
+      yield* writeStderr('Error: No .git directory. Is this a standard git repo?');
+      return false;
+    }
+
+    const uncommittedChanges = yield* Effect.either(git.hasUncommittedChanges(repoDir));
+    if (uncommittedChanges._tag === 'Left' || uncommittedChanges.right) {
+      yield* writeStderr('Error: You have uncommitted changes.');
+      yield* writeStderr('Commit or stash them first.');
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function printHeader(targetBranch: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    yield* writeStderr('Converting to bare repo structure...');
+    yield* writeStderr(`  Target branch: ${targetBranch}`);
+    yield* writeStderr('');
+  });
+}
+
+function printFooter(repoDir: string, targetBranch: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    yield* writeStderr('');
+    yield* writeStderr('Done! New structure:');
+    yield* writeStderr('');
+    yield* writeStderr(`  ${repoDir}/`);
+    yield* writeStderr('  +-- .bare/     <- git database (shared)');
+    yield* writeStderr('  +-- .git       <- pointer to .bare');
+    yield* writeStderr(`  +-- main/      <- worktree on '${targetBranch}'`);
+    yield* writeStderr('');
+    yield* writeStderr('Next steps:');
+    yield* writeStderr('  cd main        # start working');
+    yield* writeStderr('  wt co branch   # add more worktrees');
+  });
+}
+
+function convertRepo(
+  repoDir: string,
+  targetBranch: string,
+  untrackedFiles: string[],
+  tempDirRef: { current: string | null },
+): Effect.Effect<void, Error, CreateServices> {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem;
+    const git = yield* Git;
+
+    yield* fs.rename(join(repoDir, '.git'), join(repoDir, '.bare'));
+    yield* fs.writeFile(join(repoDir, '.git'), 'gitdir: .bare\n');
+    yield* git.setConfig('core.bare', 'true', repoDir);
+    yield* git.setConfig('remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*', repoDir);
+
+    const tempDir = yield* moveWorkingFiles(repoDir);
+    tempDirRef.current = tempDir;
+    yield* writeStderr(`  Staging files in: ${tempDir}`);
+
+    yield* git.addWorktree(join(repoDir, 'main'), targetBranch, { cwd: repoDir });
+
+    if (untrackedFiles.length > 0) {
+      yield* writeStderr('  Restoring untracked files...');
+      yield* restoreUntrackedFiles(tempDir, join(repoDir, 'main'), untrackedFiles);
+    }
+
+    yield* fs.remove(tempDir);
+    tempDirRef.current = null;
+  });
+}
+
+function runConversion(
+  repoDir: string,
+  tempDirRef: { current: string | null },
+): Effect.Effect<number, never, CreateServices> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    if (!(yield* validateRepo(repoDir))) return 1;
+
+    const defaultBranchResult = yield* Effect.either(git.getDefaultBranch(repoDir));
+    if (defaultBranchResult._tag === 'Left') {
+      yield* writeStderr(`Error: ${defaultBranchResult.left.message}`);
+      return 1;
+    }
+
+    const defaultBranch = defaultBranchResult.right;
+    if (!defaultBranch.isDefault) {
+      yield* writeStderr(`Note: No main/master branch. Using '${defaultBranch.branch}'.`);
+    }
+
+    const untrackedFilesResult = yield* Effect.either(git.getUntrackedFiles(repoDir));
+    if (untrackedFilesResult._tag === 'Left') {
+      yield* writeStderr(`Error: ${untrackedFilesResult.left.message}`);
+      return 1;
+    }
+
+    const untrackedFiles = untrackedFilesResult.right;
+    yield* printHeader(defaultBranch.branch);
+
+    const converted = yield* Effect.either(
+      convertRepo(repoDir, defaultBranch.branch, untrackedFiles, tempDirRef),
+    );
+
+    if (converted._tag === 'Left') {
+      yield* writeStderr(`\nError during conversion: ${converted.left.message}`);
+      yield* writeStderr('Attempting rollback...');
+      yield* rollback(repoDir, tempDirRef.current);
+      yield* writeStderr('Rollback complete. Repository should be in its original state.');
+      return 1;
+    }
+
+    yield* printFooter(repoDir, defaultBranch.branch);
+    return 0;
+  });
+}
+
+export function createProgram(dir: string): Effect.Effect<number, never, CreateServices> {
+  return runConversion(resolve(dir), { current: null });
+}
+
+async function runCreateWithInterruptRollback(
+  dir: string,
+  layer: Layer.Layer<CreateServices>,
+): Promise<number> {
+  const repoDir = resolve(dir);
+  const tempDirRef: { current: string | null } = { current: null };
+
+  const onInterrupt = (): void => {
+    console.error('\nInterrupted! Attempting rollback...');
+    void Effect.runPromise(Effect.provide(rollback(repoDir, tempDirRef.current), layer)).finally(
+      () => {
+        process.exit(1);
+      },
+    );
+  };
+
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
+
+  try {
+    return await Effect.runPromise(Effect.provide(runConversion(repoDir, tempDirRef), layer));
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onInterrupt);
+  }
+}
+
+export function makeCreateCommand(layer: Layer.Layer<CreateServices>): CommandHandler {
+  return {
+    name: 'create',
+    description: 'Convert a standard git repo to bare+worktree layout',
+    getHelp: () => HELP,
+
+    execute(args: string[]): Promise<number> {
+      if (args.includes('--help') || args.includes('-h')) {
+        return Promise.resolve(0);
+      }
+
+      const dir = args[0] ?? '.';
+      return runCreateWithInterruptRollback(dir, layer);
+    },
+  };
+}
+
+export const command: CommandHandler = makeCreateCommand(liveCreateLayer());

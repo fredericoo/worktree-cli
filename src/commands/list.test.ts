@@ -11,7 +11,11 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
   const stderr: string[] = [];
 
   const git: GitService = {
+    isStandardGitRepo: () => Effect.fail(new Error('not needed')),
     isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    hasUncommittedChanges: () => Effect.fail(new Error('not needed')),
+    getDefaultBranch: () => Effect.fail(new Error('not needed')),
+    getUntrackedFiles: () => Effect.fail(new Error('not needed')),
     getBareRoot: Effect.fail(new Error('not needed')),
     listWorktrees: () =>
       options.failure !== undefined
@@ -26,6 +30,7 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
     refExists: () => Effect.fail(new Error('not needed')),
     removeWorktree: () => Effect.fail(new Error('not needed')),
     deleteBranch: () => Effect.fail(new Error('not needed')),
+    setConfig: () => Effect.fail(new Error('not needed')),
   };
 
   const reporter: ReporterService = {

@@ -27,7 +27,11 @@ function makeTestCommand(
   }> = [];
 
   const git: GitService = {
+    isStandardGitRepo: () => Effect.fail(new Error('not needed')),
     isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    hasUncommittedChanges: () => Effect.fail(new Error('not needed')),
+    getDefaultBranch: () => Effect.fail(new Error('not needed')),
+    getUntrackedFiles: () => Effect.fail(new Error('not needed')),
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
     getWorktreeEntries: () => Effect.fail(new Error('not needed')),
@@ -47,6 +51,7 @@ function makeTestCommand(
     refExists: (ref) => Effect.succeed(options.refs?.has(ref) ?? false),
     removeWorktree: () => Effect.fail(new Error('not needed')),
     deleteBranch: () => Effect.fail(new Error('not needed')),
+    setConfig: () => Effect.fail(new Error('not needed')),
   };
 
   const reporter: ReporterService = {

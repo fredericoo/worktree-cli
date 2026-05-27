@@ -1,7 +1,10 @@
 import { Context, Effect, Layer, Schema } from 'effect';
+import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'fs/promises';
 import {
+  getDefaultBranch,
   getBareRoot,
   getHeadOid,
+  getUntrackedFiles,
   getWorktreeEntries,
   addWorktree,
   fetchRef,
@@ -9,9 +12,12 @@ import {
   hasRemoteUrl,
   findWorktreeByBranch,
   isBareRepo,
+  isStandardGitRepo,
+  hasUncommittedChanges,
   listWorktrees,
   removeWorktree,
   deleteBranch,
+  setConfig,
   type AddWorktreeOptions,
   type WorktreeEntry,
 } from './git';
@@ -32,7 +38,13 @@ interface GhResult {
 }
 
 export interface GitService {
+  readonly isStandardGitRepo: (repoDir: string) => Effect.Effect<boolean, Error>;
   readonly isBareRepo: Effect.Effect<boolean, Error>;
+  readonly hasUncommittedChanges: (repoDir: string) => Effect.Effect<boolean, Error>;
+  readonly getDefaultBranch: (
+    repoDir: string,
+  ) => Effect.Effect<{ branch: string; isDefault: boolean }, Error>;
+  readonly getUntrackedFiles: (repoDir: string) => Effect.Effect<string[], Error>;
   readonly getBareRoot: Effect.Effect<string, Error>;
   readonly listWorktrees: () => Effect.Effect<string, Error>;
   readonly getWorktreeEntries: (bareRoot: string) => Effect.Effect<WorktreeEntry[], Error>;
@@ -59,6 +71,7 @@ export interface GitService {
     options?: { force?: boolean },
   ) => Effect.Effect<void, Error>;
   readonly deleteBranch: (branch: string, bareRoot: string) => Effect.Effect<void, Error>;
+  readonly setConfig: (key: string, value: string, repoDir: string) => Effect.Effect<void, Error>;
 }
 
 export class Git extends Context.Tag('Git')<Git, GitService>() {}
@@ -77,7 +90,25 @@ export interface ReporterService {
 
 export class Reporter extends Context.Tag('Reporter')<Reporter, ReporterService>() {}
 
+export interface FileSystemEntry {
+  readonly name: string;
+}
+
+export interface FileSystemService {
+  readonly makeTempDir: (parentDir: string, prefix: string) => Effect.Effect<string, Error>;
+  readonly readDir: (dir: string) => Effect.Effect<FileSystemEntry[], Error>;
+  readonly rename: (from: string, to: string) => Effect.Effect<void, Error>;
+  readonly exists: (path: string) => Effect.Effect<boolean, Error>;
+  readonly isFile: (path: string) => Effect.Effect<boolean, Error>;
+  readonly makeDir: (path: string) => Effect.Effect<void, Error>;
+  readonly remove: (path: string) => Effect.Effect<void, Error>;
+  readonly writeFile: (path: string, contents: string) => Effect.Effect<void, Error>;
+}
+
+export class FileSystem extends Context.Tag('FileSystem')<FileSystem, FileSystemService>() {}
+
 export type CliServices = Git | Github | Reporter;
+export type CreateServices = Git | Reporter | FileSystem;
 
 function toError(error: unknown): Error {
   if (error instanceof Error) return error;
@@ -111,7 +142,11 @@ function parsePullRequests(raw: string): Effect.Effect<ReadonlyArray<PullRequest
 
 function makeGitService(): GitService {
   return {
+    isStandardGitRepo: (repoDir) => fromPromise(() => isStandardGitRepo(repoDir)),
     isBareRepo: fromPromise(() => isBareRepo()),
+    hasUncommittedChanges: (repoDir) => fromPromise(() => hasUncommittedChanges(repoDir)),
+    getDefaultBranch: (repoDir) => fromPromise(() => getDefaultBranch(repoDir)),
+    getUntrackedFiles: (repoDir) => fromPromise(() => getUntrackedFiles(repoDir)),
     getBareRoot: fromPromise(() => getBareRoot()),
     listWorktrees: () => fromPromise(() => listWorktrees()),
     getWorktreeEntries: (bareRoot) => fromPromise(() => getWorktreeEntries(bareRoot)),
@@ -131,6 +166,7 @@ function makeGitService(): GitService {
         return removeWorktree(worktreePath, removeOptions);
       }),
     deleteBranch: (branch, bareRoot) => fromPromise(() => deleteBranch(branch, bareRoot)),
+    setConfig: (key, value, repoDir) => fromPromise(() => setConfig(key, value, repoDir)),
   };
 }
 
@@ -172,11 +208,39 @@ function makeReporterService(): ReporterService {
   };
 }
 
+function makeFileSystemService(): FileSystemService {
+  return {
+    makeTempDir: (parentDir, prefix) => fromPromise(() => mkdtemp(`${parentDir}/${prefix}`)),
+    readDir: (dir) => fromPromise(async () => await readdir(dir, { withFileTypes: true })),
+    rename: (from, to) => fromPromise(() => rename(from, to)),
+    exists: (path) =>
+      Effect.gen(function* () {
+        const result = yield* Effect.either(fromPromise(() => stat(path)));
+        return result._tag === 'Right';
+      }),
+    isFile: (path) =>
+      Effect.gen(function* () {
+        const result = yield* Effect.either(fromPromise(() => stat(path)));
+        return result._tag === 'Right' && result.right.isFile();
+      }),
+    makeDir: (path) =>
+      fromPromise(async () => {
+        await mkdir(path, { recursive: true });
+      }),
+    remove: (path) => fromPromise(() => rm(path, { recursive: true, force: true })),
+    writeFile: (path, contents) => fromPromise(() => Bun.write(path, contents).then(() => {})),
+  };
+}
+
 export function liveGitReporterLayer(): Layer.Layer<Git | Reporter> {
   return Layer.mergeAll(
     Layer.succeed(Git, makeGitService()),
     Layer.succeed(Reporter, makeReporterService()),
   );
+}
+
+export function liveCreateLayer(): Layer.Layer<CreateServices> {
+  return Layer.mergeAll(liveGitReporterLayer(), Layer.succeed(FileSystem, makeFileSystemService()));
 }
 
 export function liveCliLayer(): Layer.Layer<CliServices> {

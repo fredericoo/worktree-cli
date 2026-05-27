@@ -23,7 +23,11 @@ function makeTestCommand(
   const deletedBranches: string[] = [];
 
   const git: GitService = {
+    isStandardGitRepo: () => Effect.fail(new Error('not needed')),
     isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    hasUncommittedChanges: () => Effect.fail(new Error('not needed')),
+    getDefaultBranch: () => Effect.fail(new Error('not needed')),
+    getUntrackedFiles: () => Effect.fail(new Error('not needed')),
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
     getWorktreeEntries: () => Effect.succeed(options.entries ?? [featureWorktree]),
@@ -45,6 +49,7 @@ function makeTestCommand(
         : Effect.sync(() => {
             deletedBranches.push(branch);
           }),
+    setConfig: () => Effect.fail(new Error('not needed')),
   };
 
   const reporter: ReporterService = {
