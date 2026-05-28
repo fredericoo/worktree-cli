@@ -4,7 +4,14 @@ import { join } from 'path';
 import { createTempDir, createBareRepo, runWt } from '../test-scaffold';
 import { Effect, Layer } from 'effect';
 import type { WorktreeEntry } from '../git';
-import { Git, type GitService, Reporter, type ReporterService } from '../services';
+import {
+  Git,
+  type GitService,
+  Interactive,
+  type InteractiveService,
+  Reporter,
+  type ReporterService,
+} from '../services';
 import { makeRemoveCommand } from './remove';
 
 const bareRoot = '/repo';
@@ -16,6 +23,7 @@ function makeTestCommand(
     entries?: WorktreeEntry[];
     removeFailure?: Error;
     deleteFailure?: Error;
+    selectResponse?: string | symbol;
   } = {},
 ) {
   const stderr: string[] = [];
@@ -64,9 +72,30 @@ function makeTestCommand(
       }),
   };
 
-  const layer = Layer.mergeAll(Layer.succeed(Git, git), Layer.succeed(Reporter, reporter));
+  const interactive: InteractiveService = {
+    select: () => Effect.succeed(options.selectResponse ?? featureWorktree.branch),
+    text: () => Effect.fail(new Error('not needed')),
+    isCancel: () => false,
+    cancel: () => Effect.sync(() => {}),
+    warn: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+  };
 
-  return { command: makeRemoveCommand(layer), deletedBranches, removedWorktrees, stderr };
+  const layer = Layer.mergeAll(
+    Layer.succeed(Git, git),
+    Layer.succeed(Interactive, interactive),
+    Layer.succeed(Reporter, reporter),
+  );
+
+  return {
+    command: makeRemoveCommand(layer),
+    deletedBranches,
+    promptCommand: makeRemoveCommand(layer, { isTty: () => true }),
+    removedWorktrees,
+    stderr,
+  };
 }
 
 describe('wt remove', () => {
@@ -185,5 +214,23 @@ describe('wt remove', () => {
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Error: No worktree found for branch 'missing'");
+  });
+
+  it('prompts for a worktree through injected services', async () => {
+    const { promptCommand, removedWorktrees } = makeTestCommand({ selectResponse: 'feature' });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(removedWorktrees).toEqual([{ path: featureWorktree.path, force: false }]);
+  });
+
+  it('warns when there are no worktrees to remove through injected services', async () => {
+    const { promptCommand, stderr } = makeTestCommand({ entries: [] });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('No worktrees to remove.');
   });
 });

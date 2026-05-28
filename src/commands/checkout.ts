@@ -11,10 +11,10 @@ import { join, relative } from 'path';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import { flattenBranchName, getBareRoot, getWorktreeEntries, isBareRepo } from '../git';
-import { Git, liveGitReporterLayer, Reporter } from '../services';
+import { flattenBranchName } from '../git';
+import { Git, Interactive, livePromptLayer, Reporter, type PromptServices } from '../services';
 
-type CheckoutServices = Git | Reporter;
+type CheckoutServices = PromptServices;
 
 const HELP: CommandHelp = {
   name: 'wt checkout',
@@ -109,62 +109,79 @@ function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
   });
 }
 
-async function promptForBranch(self: CommandHandler): Promise<number> {
-  if (!(await isBareRepo())) {
-    console.error(
-      'Error: Not in a bare repo. wt checkout only works with bare repo worktree setups.',
+function promptForBranch(self: CommandHandler): Effect.Effect<number, never, CheckoutServices> {
+  return Effect.gen(function* () {
+    if (!(yield* ensureBareRepo())) return 1;
+
+    const git = yield* Git;
+    const interactive = yield* Interactive;
+    const bareRoot = yield* getRequiredBareRoot();
+    if (bareRoot === null) return 1;
+
+    const entriesResult = yield* Effect.either(git.getWorktreeEntries(bareRoot));
+    if (entriesResult._tag === 'Left') {
+      yield* writeStderr(`Error: ${entriesResult.left.message}`);
+      return 1;
+    }
+
+    const selected = yield* Effect.either(
+      interactive.select('Which branch?', [
+        ...entriesResult.right.map((entry) => {
+          const relativePath = relative(bareRoot, entry.path);
+          return {
+            value: entry.branch,
+            label: entry.branch,
+            hint: relativePath !== '' ? relativePath : entry.path,
+          };
+        }),
+        {
+          value: CREATE_NEW_BRANCH,
+          label: 'Create new branch + worktree',
+          hint: 'wt co -b <branch>',
+        },
+      ]),
     );
-    console.error('Run "wt create" first to convert your repo.');
-    return 1;
-  }
 
-  const { stderrSelect, stderrText, stderrCancel, isCancel } = await import('../interactive.js');
+    if (selected._tag === 'Left') {
+      yield* writeStderr(`Error: ${selected.left.message}`);
+      return 1;
+    }
 
-  const bareRoot = await getBareRoot();
-  const entries = await getWorktreeEntries(bareRoot);
-
-  const selected = await stderrSelect({
-    message: 'Which branch?',
-    options: [
-      ...entries.map((entry) => {
-        const relativePath = relative(bareRoot, entry.path);
-        return {
-          value: entry.branch,
-          label: entry.branch,
-          hint: relativePath !== '' ? relativePath : entry.path,
-        };
-      }),
-      {
-        value: CREATE_NEW_BRANCH,
-        label: 'Create new branch + worktree',
-        hint: 'wt co -b <branch>',
-      },
-    ],
-  });
-
-  if (isCancel(selected)) {
-    stderrCancel();
-    return 0;
-  }
-
-  if (selected === CREATE_NEW_BRANCH) {
-    const branchName = await stderrText({
-      message: 'Branch name:',
-      validate: (value) => {
-        if (value === undefined || value.trim() === '') return 'Branch name is required';
-        return undefined;
-      },
-    });
-
-    if (isCancel(branchName)) {
-      stderrCancel();
+    if (interactive.isCancel(selected.right)) {
+      yield* interactive.cancel();
       return 0;
     }
 
-    return self.execute(['-b', branchName]);
-  }
+    if (selected.right === CREATE_NEW_BRANCH) {
+      return yield* promptForNewBranch(self);
+    }
 
-  return self.execute([selected]);
+    return yield* Effect.promise(() => self.execute([String(selected.right)]));
+  });
+}
+
+function promptForNewBranch(self: CommandHandler): Effect.Effect<number, never, CheckoutServices> {
+  return Effect.gen(function* () {
+    const interactive = yield* Interactive;
+    const branchName = yield* Effect.either(
+      interactive.text('Branch name:', (value) => {
+        if (value === undefined || value.trim() === '') return 'Branch name is required';
+        return undefined;
+      }),
+    );
+
+    if (branchName._tag === 'Left') {
+      yield* writeStderr(`Error: ${branchName.left.message}`);
+      return 1;
+    }
+
+    if (interactive.isCancel(branchName.right)) {
+      yield* interactive.cancel();
+      return 0;
+    }
+
+    return yield* Effect.promise(() => self.execute(['-b', String(branchName.right)]));
+  });
 }
 
 function resolveStartPoint(
@@ -375,7 +392,12 @@ export function checkoutProgram(
   });
 }
 
-export function makeCheckoutCommand(layer: Layer.Layer<CheckoutServices>): CommandHandler {
+export function makeCheckoutCommand(
+  layer: Layer.Layer<CheckoutServices>,
+  options: { isTty?: () => boolean } = {},
+): CommandHandler {
+  const isTty = options.isTty ?? (() => process.stdin.isTTY === true);
+
   return {
     name: 'checkout',
     description: 'Create or switch to a worktree for a branch',
@@ -389,11 +411,11 @@ export function makeCheckoutCommand(layer: Layer.Layer<CheckoutServices>): Comma
       }
 
       if (parsed.branch === undefined || parsed.branch === '') {
-        if (process.stdin.isTTY !== true) {
+        if (!isTty()) {
           printCommandUsage(HELP);
           return 1;
         }
-        return promptForBranch(this);
+        return Effect.runPromise(Effect.provide(promptForBranch(this), layer));
       }
 
       return Effect.runPromise(Effect.provide(checkoutProgram(parsed), layer));
@@ -401,4 +423,4 @@ export function makeCheckoutCommand(layer: Layer.Layer<CheckoutServices>): Comma
   };
 }
 
-export const command: CommandHandler = makeCheckoutCommand(liveGitReporterLayer());
+export const command: CommandHandler = makeCheckoutCommand(livePromptLayer());

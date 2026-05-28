@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'fs/promises';
+import { isCancel, stderrCancel, stderrLog, stderrSelect, stderrText } from './interactive';
 import {
   getDefaultBranch,
   getBareRoot,
@@ -107,8 +108,31 @@ export interface FileSystemService {
 
 export class FileSystem extends Context.Tag('FileSystem')<FileSystem, FileSystemService>() {}
 
+export interface InteractiveOption {
+  readonly value: string;
+  readonly label: string;
+  readonly hint?: string;
+}
+
+export interface InteractiveService {
+  readonly select: (
+    message: string,
+    options: InteractiveOption[],
+  ) => Effect.Effect<string | symbol, Error>;
+  readonly text: (
+    message: string,
+    validate: (value: string | undefined) => string | undefined,
+  ) => Effect.Effect<string | symbol, Error>;
+  readonly isCancel: (value: unknown) => boolean;
+  readonly cancel: () => Effect.Effect<void>;
+  readonly warn: (message: string) => Effect.Effect<void>;
+}
+
+export class Interactive extends Context.Tag('Interactive')<Interactive, InteractiveService>() {}
+
 export type CliServices = Git | Github | Reporter;
 export type CreateServices = Git | Reporter | FileSystem;
+export type PromptServices = Git | Reporter | Interactive;
 
 function toError(error: unknown): Error {
   if (error instanceof Error) return error;
@@ -232,6 +256,16 @@ function makeFileSystemService(): FileSystemService {
   };
 }
 
+function makeInteractiveService(): InteractiveService {
+  return {
+    select: (message, options) => fromPromise(() => stderrSelect({ message, options })),
+    text: (message, validate) => fromPromise(() => stderrText({ message, validate })),
+    isCancel: (value) => isCancel(value),
+    cancel: () => Effect.sync(() => stderrCancel()),
+    warn: (message) => Effect.sync(() => stderrLog.warn(message)),
+  };
+}
+
 export function liveGitReporterLayer(): Layer.Layer<Git | Reporter> {
   return Layer.mergeAll(
     Layer.succeed(Git, makeGitService()),
@@ -241,6 +275,13 @@ export function liveGitReporterLayer(): Layer.Layer<Git | Reporter> {
 
 export function liveCreateLayer(): Layer.Layer<CreateServices> {
   return Layer.mergeAll(liveGitReporterLayer(), Layer.succeed(FileSystem, makeFileSystemService()));
+}
+
+export function livePromptLayer(): Layer.Layer<PromptServices> {
+  return Layer.mergeAll(
+    liveGitReporterLayer(),
+    Layer.succeed(Interactive, makeInteractiveService()),
+  );
 }
 
 export function liveCliLayer(): Layer.Layer<CliServices> {

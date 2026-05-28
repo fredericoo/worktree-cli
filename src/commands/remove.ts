@@ -7,10 +7,9 @@ import { relative } from 'path';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import { getBareRoot, getWorktreeEntries, isBareRepo } from '../git';
-import { Git, liveGitReporterLayer, Reporter } from '../services';
+import { Git, Interactive, livePromptLayer, Reporter, type PromptServices } from '../services';
 
-type RemoveServices = Git | Reporter;
+type RemoveServices = PromptServices;
 
 const HELP: CommandHelp = {
   name: 'wt remove',
@@ -70,42 +69,64 @@ function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
   });
 }
 
-async function promptForWorktree(self: CommandHandler, flags: string[]): Promise<number> {
-  if (!(await isBareRepo())) {
-    console.error(
-      'Error: Not in a bare repo. wt remove only works with bare repo worktree setups.',
+function promptForWorktree(
+  self: CommandHandler,
+  flags: string[],
+): Effect.Effect<number, never, RemoveServices> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const interactive = yield* Interactive;
+
+    if (!(yield* validateBareRepo(git))) {
+      yield* writeStderr(
+        'Error: Not in a bare repo. wt remove only works with bare repo worktree setups.',
+      );
+      return 1;
+    }
+
+    const bareRoot = yield* Effect.either(git.getBareRoot);
+    if (bareRoot._tag === 'Left') {
+      yield* writeStderr(`Error: ${bareRoot.left.message}`);
+      return 1;
+    }
+
+    const entries = yield* Effect.either(git.getWorktreeEntries(bareRoot.right));
+    if (entries._tag === 'Left') {
+      yield* writeStderr(`Error: ${entries.left.message}`);
+      return 1;
+    }
+
+    if (entries.right.length === 0) {
+      yield* interactive.warn('No worktrees to remove.');
+      return 1;
+    }
+
+    const selected = yield* Effect.either(
+      interactive.select(
+        'Which worktree to remove?',
+        entries.right.map((entry) => {
+          const relativePath = relative(bareRoot.right, entry.path);
+          return {
+            value: entry.branch,
+            label: entry.branch,
+            hint: relativePath !== '' ? relativePath : entry.path,
+          };
+        }),
+      ),
     );
-    return 1;
-  }
 
-  const { stderrSelect, stderrCancel, stderrLog, isCancel } = await import('../interactive.js');
+    if (selected._tag === 'Left') {
+      yield* writeStderr(`Error: ${selected.left.message}`);
+      return 1;
+    }
 
-  const bareRoot = await getBareRoot();
-  const entries = await getWorktreeEntries(bareRoot);
+    if (interactive.isCancel(selected.right)) {
+      yield* interactive.cancel();
+      return 0;
+    }
 
-  if (entries.length === 0) {
-    stderrLog.warn('No worktrees to remove.');
-    return 1;
-  }
-
-  const selected = await stderrSelect({
-    message: 'Which worktree to remove?',
-    options: entries.map((entry) => {
-      const relativePath = relative(bareRoot, entry.path);
-      return {
-        value: entry.branch,
-        label: entry.branch,
-        hint: relativePath !== '' ? relativePath : entry.path,
-      };
-    }),
+    return yield* Effect.promise(() => self.execute([...flags, String(selected.right)]));
   });
-
-  if (isCancel(selected) || typeof selected !== 'string') {
-    stderrCancel();
-    return 0;
-  }
-
-  return self.execute([...flags, selected]);
 }
 
 function validateBareRepo(git: import('../services').GitService): Effect.Effect<boolean, never> {
@@ -212,7 +233,12 @@ export function removeProgram(
   });
 }
 
-export function makeRemoveCommand(layer: Layer.Layer<RemoveServices>): CommandHandler {
+export function makeRemoveCommand(
+  layer: Layer.Layer<RemoveServices>,
+  options: { isTty?: () => boolean } = {},
+): CommandHandler {
+  const isTty = options.isTty ?? (() => process.stdin.isTTY === true);
+
   return {
     name: 'remove',
     description: 'Remove a worktree',
@@ -222,11 +248,13 @@ export function makeRemoveCommand(layer: Layer.Layer<RemoveServices>): CommandHa
       const options = parseArgs(args);
 
       if (options.branch === undefined || options.branch === '') {
-        if (process.stdin.isTTY !== true) {
+        if (!isTty()) {
           printCommandUsage(HELP);
           return 1;
         }
-        return promptForWorktree(this, extractFlags(args));
+        return Effect.runPromise(
+          Effect.provide(promptForWorktree(this, extractFlags(args)), layer),
+        );
       }
 
       return Effect.runPromise(Effect.provide(removeProgram(options), layer));
@@ -234,4 +262,4 @@ export function makeRemoveCommand(layer: Layer.Layer<RemoveServices>): CommandHa
   };
 }
 
-export const command: CommandHandler = makeRemoveCommand(liveGitReporterLayer());
+export const command: CommandHandler = makeRemoveCommand(livePromptLayer());

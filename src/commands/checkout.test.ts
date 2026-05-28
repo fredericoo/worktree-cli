@@ -3,7 +3,14 @@ import { stat, rm } from 'fs/promises';
 import { join } from 'path';
 import { createTempDir, createBareRepo, createBareRepoWithRemote, runWt } from '../test-scaffold';
 import { Effect, Layer } from 'effect';
-import { Git, type GitService, Reporter, type ReporterService } from '../services';
+import {
+  Git,
+  type GitService,
+  Interactive,
+  type InteractiveService,
+  Reporter,
+  type ReporterService,
+} from '../services';
 import { makeCheckoutCommand } from './checkout';
 
 const bareRoot = '/repo';
@@ -15,6 +22,8 @@ function makeTestCommand(
     hasRemote?: boolean;
     fetched?: boolean;
     refs?: Set<string>;
+    selectResponse?: string | symbol;
+    textResponse?: string | symbol;
   } = {},
 ) {
   const stdout: string[] = [];
@@ -34,7 +43,8 @@ function makeTestCommand(
     getUntrackedFiles: () => Effect.fail(new Error('not needed')),
     getBareRoot: Effect.succeed(bareRoot),
     listWorktrees: () => Effect.fail(new Error('not needed')),
-    getWorktreeEntries: () => Effect.fail(new Error('not needed')),
+    getWorktreeEntries: () =>
+      Effect.succeed([{ path: '/repo/existing-feature', branch: 'existing-feature' }]),
     findWorktreeByBranch: () => Effect.succeed(options.existingPath ?? null),
     getHeadOid: () => Effect.fail(new Error('not needed')),
     addWorktree: (worktreePath, branch, addOptions) =>
@@ -69,9 +79,30 @@ function makeTestCommand(
       }),
   };
 
-  const layer = Layer.mergeAll(Layer.succeed(Git, git), Layer.succeed(Reporter, reporter));
+  const interactive: InteractiveService = {
+    select: () => Effect.succeed(options.selectResponse ?? 'existing-feature'),
+    text: () => Effect.succeed(options.textResponse ?? 'new-feature'),
+    isCancel: () => false,
+    cancel: () => Effect.sync(() => {}),
+    warn: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+  };
 
-  return { addedWorktrees, command: makeCheckoutCommand(layer), stderr, stdout };
+  const layer = Layer.mergeAll(
+    Layer.succeed(Git, git),
+    Layer.succeed(Interactive, interactive),
+    Layer.succeed(Reporter, reporter),
+  );
+
+  return {
+    addedWorktrees,
+    command: makeCheckoutCommand(layer),
+    promptCommand: makeCheckoutCommand(layer, { isTty: () => true }),
+    stderr,
+    stdout,
+  };
 }
 
 describe('wt checkout', () => {
@@ -220,6 +251,30 @@ describe('wt checkout', () => {
     expect(exitCode).toBe(0);
     expect(stderr).toContain('Note: No remote URL configured, branching from HEAD');
     expect(addedWorktrees[0]?.startPoint).toBeUndefined();
+  });
+
+  it('prompts for an existing branch through injected services', async () => {
+    const { promptCommand, stdout } = makeTestCommand({
+      existingPath: '/repo/existing-feature',
+      selectResponse: 'existing-feature',
+    });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/existing-feature']);
+  });
+
+  it('prompts for a new branch name through injected services', async () => {
+    const { promptCommand, addedWorktrees } = makeTestCommand({
+      selectResponse: '__create_new_branch__',
+      textResponse: 'prompt-feature',
+    });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(addedWorktrees[0]?.branch).toBe('prompt-feature');
   });
 });
 
