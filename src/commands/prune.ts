@@ -45,7 +45,7 @@ interface PruneDashboard {
   rows: DashboardRow[];
   checkedCount: number;
   frameIndex: number;
-  lastLineCount: number;
+  hasRendered: boolean;
 }
 
 const HELP: CommandHelp = {
@@ -100,7 +100,7 @@ function makeDashboard(entries: WorktreeEntry[]): PruneDashboard {
     rows: entries.map((entry) => ({ entry, status: 'checking', detail: '' })),
     checkedCount: 0,
     frameIndex: 0,
-    lastLineCount: 0,
+    hasRendered: false,
   };
 }
 
@@ -145,18 +145,6 @@ function formatDashboard(dashboard: PruneDashboard, isDone: boolean): string {
   return lines.join('\n');
 }
 
-function clearPreviousDashboard(lineCount: number): string {
-  if (lineCount === 0) return '';
-
-  let output = `\x1b[${lineCount}A`;
-  for (let index = 0; index < lineCount; index++) {
-    output += '\x1b[2K';
-    if (index < lineCount - 1) output += '\x1b[1B';
-  }
-  if (lineCount > 1) output += `\x1b[${lineCount - 1}A`;
-  return `${output}\r`;
-}
-
 function renderDashboard(
   dashboard: PruneDashboard,
   isDone = false,
@@ -166,10 +154,9 @@ function renderDashboard(
     if (!reporter.stderrIsTty) return;
 
     const content = formatDashboard(dashboard, isDone);
-    const lines = content.split('\n');
-    const clear = clearPreviousDashboard(dashboard.lastLineCount);
+    const clear = dashboard.hasRendered ? '\x1b[u\x1b[0J' : '\x1b[s';
     dashboard.frameIndex++;
-    dashboard.lastLineCount = lines.length;
+    dashboard.hasRendered = true;
     yield* reporter.writeStderrRaw(`${clear}${content}\n`);
   });
 }

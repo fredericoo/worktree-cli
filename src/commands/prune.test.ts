@@ -236,4 +236,26 @@ describe('wt prune', () => {
     expect(output).toContain('open-feature');
     expect(output).toContain('kept');
   });
+
+  it('repaints the dashboard from a saved cursor position', async () => {
+    const mergedWorktree = makeWorktree('merged-feature');
+    const { command, logs } = makeTestServices({
+      stderrIsTty: true,
+      entries: [mergedWorktree],
+      heads: { [mergedWorktree.path]: 'merged-head' },
+      pullRequests: {
+        [mergedWorktree.branch]: {
+          headRefOid: 'merged-head',
+          state: 'MERGED',
+          url: 'https://github.test/pull/1',
+        },
+      },
+    });
+
+    const exitCode = await command.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(logs[0]?.startsWith('\x1b[s')).toBe(true);
+    expect(logs.some((log) => log.startsWith('\x1b[u\x1b[0J'))).toBe(true);
+  });
 });
