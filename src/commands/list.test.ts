@@ -51,6 +51,11 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
       Effect.sync(() => {
         stderr.push(message);
       }),
+    createTaskLog: (title) => ({
+      message: (message) => stderr.push(`${title}\n${message}`),
+      success: (message) => stderr.push(message),
+      error: (message) => stderr.push(message),
+    }),
   };
 
   const layer = Layer.mergeAll(Layer.succeed(Git, git), Layer.succeed(Reporter, reporter));

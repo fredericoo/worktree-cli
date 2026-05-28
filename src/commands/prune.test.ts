@@ -86,6 +86,11 @@ function makeTestServices(options: TestServiceOptions = {}): TestServices {
       Effect.sync(() => {
         logs.push(message);
       }),
+    createTaskLog: (title) => ({
+      message: (message) => logs.push(`${title}\n${message}`),
+      success: (message) => logs.push(message),
+      error: (message) => logs.push(message),
+    }),
   };
 
   const layer = Layer.mergeAll(
@@ -237,7 +242,7 @@ describe('wt prune', () => {
     expect(output).toContain('kept');
   });
 
-  it('repaints the dashboard from a saved cursor position', async () => {
+  it('renders dashboard updates through the task log abstraction', async () => {
     const mergedWorktree = makeWorktree('merged-feature');
     const { command, logs } = makeTestServices({
       stderrIsTty: true,
@@ -255,7 +260,7 @@ describe('wt prune', () => {
     const exitCode = await command.execute([]);
 
     expect(exitCode).toBe(0);
-    expect(logs[0]?.startsWith('\x1b[s')).toBe(true);
-    expect(logs.some((log) => log.startsWith('\x1b[u\x1b[0J'))).toBe(true);
+    expect(logs.some((log) => log.startsWith('Pruning worktrees\n'))).toBe(true);
+    expect(logs).toContain('Prune complete: removed 1, failed 0.');
   });
 });

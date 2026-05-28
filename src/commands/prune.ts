@@ -15,6 +15,7 @@ import {
   type CliServices,
   type GitService,
   type PullRequest,
+  type TaskLog,
 } from '../services';
 
 const GITHUB_CHECKS_PER_BATCH = 20;
@@ -44,8 +45,7 @@ interface DashboardRow {
 interface PruneDashboard {
   rows: DashboardRow[];
   checkedCount: number;
-  frameIndex: number;
-  hasRendered: boolean;
+  log: TaskLog | null;
 }
 
 const HELP: CommandHelp = {
@@ -99,8 +99,7 @@ function makeDashboard(entries: WorktreeEntry[]): PruneDashboard {
   return {
     rows: entries.map((entry) => ({ entry, status: 'checking', detail: '' })),
     checkedCount: 0,
-    frameIndex: 0,
-    hasRendered: false,
+    log: null,
   };
 }
 
@@ -116,21 +115,13 @@ function updateDashboardRow(
   row.detail = detail;
 }
 
-function spinnerFrame(index: number): string {
-  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const fallbackFrame = '⠋';
-  return frames[index % frames.length] ?? fallbackFrame;
-}
-
 function visibleDashboardRows(rows: DashboardRow[]): DashboardRow[] {
   return rows.slice(0, MAX_VISIBLE_WORKTREES);
 }
 
-function formatDashboard(dashboard: PruneDashboard, isDone: boolean): string {
+function formatDashboard(dashboard: PruneDashboard): string {
   const totalCount = dashboard.rows.length;
-  const marker = isDone ? color('✓', 32) : color(spinnerFrame(dashboard.frameIndex), 36);
-  const title = `${marker} ${bold('Pruning worktrees')} (${dashboard.checkedCount}/${totalCount} checked)`;
-  const lines = [title];
+  const lines = [`${bold('Status')} ${dashboard.checkedCount}/${totalCount} checked`];
 
   for (const row of visibleDashboardRows(dashboard.rows)) {
     const detail = row.detail !== '' ? dim(` ${row.detail}`) : '';
@@ -145,19 +136,43 @@ function formatDashboard(dashboard: PruneDashboard, isDone: boolean): string {
   return lines.join('\n');
 }
 
-function renderDashboard(
-  dashboard: PruneDashboard,
-  isDone = false,
-): Effect.Effect<void, never, Reporter> {
+function renderDashboard(dashboard: PruneDashboard): Effect.Effect<void, never, Reporter> {
   return Effect.gen(function* () {
     const reporter = yield* Reporter;
     if (!reporter.stderrIsTty) return;
 
-    const content = formatDashboard(dashboard, isDone);
-    const clear = dashboard.hasRendered ? '\x1b[u\x1b[0J' : '\x1b[s';
-    dashboard.frameIndex++;
-    dashboard.hasRendered = true;
-    yield* reporter.writeStderrRaw(`${clear}${content}\n`);
+    dashboard.log ??= reporter.createTaskLog('Pruning worktrees', {
+      limit: MAX_VISIBLE_WORKTREES + 2,
+      retainLog: true,
+    });
+    dashboard.log.message(formatDashboard(dashboard), { raw: true });
+  });
+}
+
+function finishDashboard(
+  dashboard: PruneDashboard,
+  summary: string,
+  failed: boolean,
+): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+
+    if (!reporter.stderrIsTty) {
+      yield* reporter.writeStderr(summary);
+      return;
+    }
+
+    dashboard.log ??= reporter.createTaskLog('Pruning worktrees', {
+      limit: MAX_VISIBLE_WORKTREES + 2,
+      retainLog: true,
+    });
+    dashboard.log.message(formatDashboard(dashboard), { raw: true });
+
+    if (failed) {
+      dashboard.log.error(summary, { showLog: true });
+    } else {
+      dashboard.log.success(summary, { showLog: true });
+    }
   });
 }
 
@@ -354,15 +369,16 @@ export function pruneProgram(): Effect.Effect<number, Error, CliServices> {
 
     const checks = yield* checkAllWorktrees(entries, dashboard);
     const removals = yield* removePrunedWorktrees(bareRoot, checks, dashboard);
-    yield* renderDashboard(dashboard, true);
-    yield* writeStderr(summarize(removals));
+    const summary = summarize(removals);
+    const failed = hasFailedRemoval(removals);
+    yield* finishDashboard(dashboard, summary, failed);
 
     const failureTable = formatFailureTable(removals);
     if (failureTable !== null) {
       yield* writeStderr(failureTable);
     }
 
-    return hasFailedRemoval(removals) ? 1 : 0;
+    return failed ? 1 : 0;
   });
 }
 

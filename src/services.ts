@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'fs/promises';
+import { taskLog } from '@clack/prompts';
 import { isCancel, stderrCancel, stderrLog, stderrSelect, stderrText } from './interactive';
 import {
   getDefaultBranch,
@@ -89,6 +90,18 @@ export interface ReporterService {
   readonly writeStdout: (message: string) => Effect.Effect<void>;
   readonly writeStderr: (message: string) => Effect.Effect<void>;
   readonly writeStderrRaw: (message: string) => Effect.Effect<void>;
+  readonly createTaskLog: (title: string, options?: TaskLogOptions) => TaskLog;
+}
+
+export interface TaskLogOptions {
+  readonly limit?: number;
+  readonly retainLog?: boolean;
+}
+
+export interface TaskLog {
+  readonly message: (message: string, options?: { raw?: boolean }) => void;
+  readonly success: (message: string, options?: { showLog?: boolean }) => void;
+  readonly error: (message: string, options?: { showLog?: boolean }) => void;
 }
 
 export class Reporter extends Context.Tag('Reporter')<Reporter, ReporterService>() {}
@@ -233,6 +246,15 @@ function makeReporterService(): ReporterService {
     writeStdout: (message) => Effect.sync(() => console.log(message)),
     writeStderr: (message) => Effect.sync(() => console.error(message)),
     writeStderrRaw: (message) => Effect.sync(() => process.stderr.write(message)),
+    createTaskLog: (title, options = {}) => {
+      const taskLogOptions = {
+        title,
+        output: process.stderr,
+        ...(options.limit !== undefined && { limit: options.limit }),
+        ...(options.retainLog !== undefined && { retainLog: options.retainLog }),
+      };
+      return taskLog(taskLogOptions);
+    },
   };
 }
 

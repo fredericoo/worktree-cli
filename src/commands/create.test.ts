@@ -92,6 +92,11 @@ function makeTestCommand(options: { addWorktreeFailure?: Error } = {}) {
       Effect.sync(() => {
         stderr.push(message);
       }),
+    createTaskLog: (title) => ({
+      message: (message) => stderr.push(`${title}\n${message}`),
+      success: (message) => stderr.push(message),
+      error: (message) => stderr.push(message),
+    }),
   };
 
   const layer = Layer.mergeAll(
