@@ -31,6 +31,7 @@ interface TestServiceOptions {
   heads?: Record<string, string>;
   pullRequests?: Record<string, { headRefOid: string; state: string; url: string }>;
   failingRemovals?: Set<string>;
+  stderrIsTty?: boolean;
 }
 
 function makeTestServices(options: TestServiceOptions = {}): TestServices {
@@ -71,12 +72,17 @@ function makeTestServices(options: TestServiceOptions = {}): TestServices {
   };
 
   const reporter: ReporterService = {
+    stderrIsTty: options.stderrIsTty === true,
     log: (message) =>
       Effect.sync(() => {
         logs.push(message);
       }),
     writeStdout: () => Effect.sync(() => {}),
     writeStderr: (message) =>
+      Effect.sync(() => {
+        logs.push(message);
+      }),
+    writeStderrRaw: (message) =>
       Effect.sync(() => {
         logs.push(message);
       }),
@@ -129,8 +135,8 @@ describe('wt prune', () => {
 
     expect(exitCode).toBe(0);
     expect(removedWorktrees).toEqual([mergedWorktree.path]);
-    expect(logs).toContain(`Removed worktree: ${mergedWorktree.branch}`);
-    expect(logs).toContain('Prune complete: removed 1, kept 1, failed 0.');
+    expect(logs).toContain('Prune complete: removed 1, failed 0.');
+    expect(logs).not.toContain('Prune complete: removed 1, kept 1, failed 0.');
   });
 
   it('keeps a worktree whose PR is not merged', async () => {
@@ -150,7 +156,8 @@ describe('wt prune', () => {
 
     expect(exitCode).toBe(0);
     expect(removedWorktrees).toEqual([]);
-    expect(logs).toContain(`Kept ${openWorktree.branch}: PR is OPEN`);
+    expect(logs).toContain('Prune complete: removed 0, failed 0.');
+    expect(logs.join('\n')).not.toContain(`Kept ${openWorktree.branch}`);
   });
 
   it('keeps a merged PR worktree when local HEAD has diverged', async () => {
@@ -170,7 +177,7 @@ describe('wt prune', () => {
 
     expect(exitCode).toBe(0);
     expect(removedWorktrees).toEqual([]);
-    expect(logs).toContain(`Kept ${advancedWorktree.branch}: PR HEAD does not match local HEAD`);
+    expect(logs).toContain('Prune complete: removed 0, failed 0.');
   });
 
   it('fails when a prunable worktree cannot be removed safely', async () => {
@@ -191,9 +198,42 @@ describe('wt prune', () => {
 
     expect(exitCode).toBe(1);
     expect(removedWorktrees).toEqual([]);
-    expect(logs).toContain(
-      `Failed to remove ${dirtyWorktree.branch}: worktree contains uncommitted changes`,
-    );
-    expect(logs).toContain('Prune complete: removed 0, kept 0, failed 1.');
+    expect(logs).toContain('Prune complete: removed 0, failed 1.');
+    const output = logs.join('\n');
+    expect(output).toContain('Failures');
+    expect(output).toContain('dirty-feature');
+    expect(output).toContain('worktree contains uncommitted changes');
+  });
+
+  it('renders live worktree statuses when stderr is interactive', async () => {
+    const mergedWorktree = makeWorktree('merged-feature');
+    const openWorktree = makeWorktree('open-feature');
+    const { command, logs } = makeTestServices({
+      stderrIsTty: true,
+      entries: [mergedWorktree, openWorktree],
+      heads: { [mergedWorktree.path]: 'merged-head' },
+      pullRequests: {
+        [mergedWorktree.branch]: {
+          headRefOid: 'merged-head',
+          state: 'MERGED',
+          url: 'https://github.test/pull/1',
+        },
+        [openWorktree.branch]: {
+          headRefOid: 'local-head',
+          state: 'OPEN',
+          url: 'https://github.test/pull/2',
+        },
+      },
+    });
+
+    const exitCode = await command.execute([]);
+
+    expect(exitCode).toBe(0);
+    const output = logs.join('\n');
+    expect(output).toContain('Pruning worktrees');
+    expect(output).toContain('merged-feature');
+    expect(output).toContain('pruned');
+    expect(output).toContain('open-feature');
+    expect(output).toContain('kept');
   });
 });

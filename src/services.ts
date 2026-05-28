@@ -84,9 +84,11 @@ export interface GithubService {
 export class Github extends Context.Tag('Github')<Github, GithubService>() {}
 
 export interface ReporterService {
+  readonly stderrIsTty: boolean;
   readonly log: (message: string) => Effect.Effect<void>;
   readonly writeStdout: (message: string) => Effect.Effect<void>;
   readonly writeStderr: (message: string) => Effect.Effect<void>;
+  readonly writeStderrRaw: (message: string) => Effect.Effect<void>;
 }
 
 export class Reporter extends Context.Tag('Reporter')<Reporter, ReporterService>() {}
@@ -226,9 +228,11 @@ function makeGithubService(): GithubService {
 
 function makeReporterService(): ReporterService {
   return {
+    stderrIsTty: process.stderr.isTTY === true,
     log: (message) => Effect.sync(() => console.error(message)),
     writeStdout: (message) => Effect.sync(() => console.log(message)),
     writeStderr: (message) => Effect.sync(() => console.error(message)),
+    writeStderrRaw: (message) => Effect.sync(() => process.stderr.write(message)),
   };
 }
 

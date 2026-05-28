@@ -34,6 +34,7 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
   };
 
   const reporter: ReporterService = {
+    stderrIsTty: false,
     log: (message) =>
       Effect.sync(() => {
         stderr.push(message);
@@ -43,6 +44,10 @@ function makeTestCommand(options: { isBareRepo?: boolean; output?: string; failu
         stdout.push(message);
       }),
     writeStderr: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStderrRaw: (message) =>
       Effect.sync(() => {
         stderr.push(message);
       }),

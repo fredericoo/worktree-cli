@@ -78,12 +78,17 @@ function makeTestCommand(options: { addWorktreeFailure?: Error } = {}) {
   };
 
   const reporter: ReporterService = {
+    stderrIsTty: false,
     log: (message) =>
       Effect.sync(() => {
         stderr.push(message);
       }),
     writeStdout: () => Effect.sync(() => {}),
     writeStderr: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStderrRaw: (message) =>
       Effect.sync(() => {
         stderr.push(message);
       }),
