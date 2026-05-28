@@ -15,16 +15,12 @@ import {
   type CliServices,
   type GitService,
   type PullRequest,
-  type TaskLog,
 } from '../services';
 
 const GITHUB_CHECKS_PER_BATCH = 20;
 const GITHUB_CHECK_CONCURRENCY = 5;
-const GITHUB_BATCH_DELAY_MS = 60_000;
-const MAX_VISIBLE_WORKTREES = 50;
+const GITHUB_BATCH_DELAY_MS = 5_000;
 const FAILURE_REASON_MAX_WIDTH = 96;
-
-type PruneStatus = 'checking' | 'pruning' | 'pruned' | 'failed' | 'kept';
 
 type PruneCheck =
   | { kind: 'prune'; entry: WorktreeEntry; pullRequest: PullRequest }
@@ -34,18 +30,6 @@ interface RemovalResult {
   entry: WorktreeEntry;
   status: 'removed' | 'kept' | 'failed';
   reason?: string;
-}
-
-interface DashboardRow {
-  entry: WorktreeEntry;
-  status: PruneStatus;
-  detail: string;
-}
-
-interface PruneDashboard {
-  rows: DashboardRow[];
-  checkedCount: number;
-  log: TaskLog | null;
 }
 
 const HELP: CommandHelp = {
@@ -67,6 +51,35 @@ commits after the PR was merged.`,
   ],
 };
 
+function color(text: string, code: number): string {
+  if (isNoColorSet()) return text;
+  return `\x1b[${code}m${text}\x1b[0m`;
+}
+
+function statusLine(
+  status: 'checking' | 'pruning' | 'pruned' | 'failed' | 'kept',
+  branch: string,
+  detail = '',
+): string {
+  const label = (() => {
+    switch (status) {
+      case 'checking':
+        return color('checking', 33);
+      case 'pruning':
+        return color('pruning ', 36);
+      case 'pruned':
+        return color('pruned  ', 32);
+      case 'failed':
+        return color('failed  ', 31);
+      case 'kept':
+        return dim('kept    ');
+    }
+  })();
+
+  const suffix = detail === '' ? '' : dim(` ${detail}`);
+  return `  ${label}  ${branch}${suffix}`;
+}
+
 function chunkWorktrees(entries: WorktreeEntry[]): WorktreeEntry[][] {
   const chunks: WorktreeEntry[][] = [];
   for (let index = 0; index < entries.length; index += GITHUB_CHECKS_PER_BATCH) {
@@ -75,105 +88,129 @@ function chunkWorktrees(entries: WorktreeEntry[]): WorktreeEntry[][] {
   return chunks;
 }
 
-function color(text: string, code: number): string {
-  if (isNoColorSet()) return text;
-  return `\x1b[${code}m${text}\x1b[0m`;
+function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.writeStderr(message);
+  });
 }
 
-function statusLabel(status: PruneStatus): string {
-  switch (status) {
-    case 'checking':
-      return color('checking', 33);
-    case 'pruning':
-      return color('pruning ', 36);
-    case 'pruned':
-      return color('pruned  ', 32);
-    case 'failed':
-      return color('failed  ', 31);
-    case 'kept':
-      return dim('kept    ');
-  }
+function checkWorktree(entry: WorktreeEntry): Effect.Effect<PruneCheck, Error, Git | Github> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const github = yield* Github;
+    const localHeadOid = yield* git.getHeadOid(entry.path);
+    const pullRequest = yield* github.getPullRequest(entry);
+
+    if (pullRequest === null) {
+      return { kind: 'keep', entry, reason: 'no PR found' };
+    }
+
+    if (pullRequest.state !== 'MERGED') {
+      return { kind: 'keep', entry, reason: `PR is ${pullRequest.state}` };
+    }
+
+    if (pullRequest.headRefOid !== localHeadOid) {
+      return { kind: 'keep', entry, reason: 'PR HEAD does not match local HEAD' };
+    }
+
+    return { kind: 'prune', entry, pullRequest };
+  });
 }
 
-function makeDashboard(entries: WorktreeEntry[]): PruneDashboard {
-  return {
-    rows: entries.map((entry) => ({ entry, status: 'checking', detail: '' })),
-    checkedCount: 0,
-    log: null,
-  };
-}
-
-function updateDashboardRow(
-  dashboard: PruneDashboard,
+function checkWorktreeWithStatus(
   entry: WorktreeEntry,
-  status: PruneStatus,
-  detail = '',
-): void {
-  const row = dashboard.rows.find((candidate) => candidate.entry.branch === entry.branch);
-  if (row === undefined) return;
-  row.status = status;
-  row.detail = detail;
-}
-
-function visibleDashboardRows(rows: DashboardRow[]): DashboardRow[] {
-  return rows.slice(0, MAX_VISIBLE_WORKTREES);
-}
-
-function formatDashboard(dashboard: PruneDashboard): string {
-  const totalCount = dashboard.rows.length;
-  const lines = [`${bold('Status')} ${dashboard.checkedCount}/${totalCount} checked`];
-
-  for (const row of visibleDashboardRows(dashboard.rows)) {
-    const detail = row.detail !== '' ? dim(` ${row.detail}`) : '';
-    lines.push(`  ${statusLabel(row.status)}  ${row.entry.branch}${detail}`);
-  }
-
-  const remainingCount = dashboard.rows.length - MAX_VISIBLE_WORKTREES;
-  if (remainingCount > 0) {
-    lines.push(dim(`  …${remainingCount} more`));
-  }
-
-  return lines.join('\n');
-}
-
-function renderDashboard(dashboard: PruneDashboard): Effect.Effect<void, never, Reporter> {
+): Effect.Effect<PruneCheck, Error, CliServices> {
   return Effect.gen(function* () {
-    const reporter = yield* Reporter;
-    if (!reporter.stderrIsTty) return;
+    const result = yield* checkWorktree(entry);
 
-    dashboard.log ??= reporter.createTaskLog('Pruning worktrees', {
-      limit: MAX_VISIBLE_WORKTREES + 2,
-      retainLog: true,
-    });
-    dashboard.log.message(formatDashboard(dashboard), { raw: true });
-  });
-}
-
-function finishDashboard(
-  dashboard: PruneDashboard,
-  summary: string,
-  failed: boolean,
-): Effect.Effect<void, never, Reporter> {
-  return Effect.gen(function* () {
-    const reporter = yield* Reporter;
-
-    if (!reporter.stderrIsTty) {
-      yield* reporter.writeStderr(summary);
-      return;
-    }
-
-    dashboard.log ??= reporter.createTaskLog('Pruning worktrees', {
-      limit: MAX_VISIBLE_WORKTREES + 2,
-      retainLog: true,
-    });
-    dashboard.log.message(formatDashboard(dashboard), { raw: true });
-
-    if (failed) {
-      dashboard.log.error(summary, { showLog: true });
+    if (result.kind === 'keep') {
+      yield* writeStderr(statusLine('kept', entry.branch, result.reason));
     } else {
-      dashboard.log.success(summary, { showLog: true });
+      yield* writeStderr(statusLine('pruning', entry.branch, result.pullRequest.url));
     }
+
+    return result;
   });
+}
+
+function checkWorktreeBatch(
+  batch: WorktreeEntry[],
+): Effect.Effect<PruneCheck[], Error, CliServices> {
+  return Effect.forEach(batch, checkWorktreeWithStatus, { concurrency: GITHUB_CHECK_CONCURRENCY });
+}
+
+function checkAllWorktrees(
+  entries: WorktreeEntry[],
+): Effect.Effect<PruneCheck[], Error, CliServices> {
+  return Effect.gen(function* () {
+    const batches = chunkWorktrees(entries);
+    const checks: PruneCheck[] = [];
+
+    for (const [index, batch] of batches.entries()) {
+      yield* writeStderr(
+        `${bold('Checking batch')} ${index + 1}/${batches.length} (${batch.length} worktrees)`,
+      );
+      checks.push(...(yield* checkWorktreeBatch(batch)));
+
+      if (index + 1 < batches.length) {
+        yield* writeStderr(
+          dim(`Waiting ${GITHUB_BATCH_DELAY_MS / 1_000}s before next GitHub batch...`),
+        );
+        yield* Effect.sleep(Duration.millis(GITHUB_BATCH_DELAY_MS));
+      }
+    }
+
+    return checks;
+  });
+}
+
+function removePrunedWorktrees(
+  bareRoot: string,
+  checks: PruneCheck[],
+): Effect.Effect<RemovalResult[], never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const results: RemovalResult[] = [];
+
+    for (const check of checks) {
+      if (check.kind === 'keep') {
+        results.push({ entry: check.entry, status: 'kept' });
+        continue;
+      }
+
+      results.push(yield* removeWorktreeForCheck(git, bareRoot, check));
+    }
+
+    return results;
+  });
+}
+
+function removeWorktreeForCheck(
+  git: GitService,
+  bareRoot: string,
+  check: Extract<PruneCheck, { kind: 'prune' }>,
+): Effect.Effect<RemovalResult, never, Reporter> {
+  return Effect.gen(function* () {
+    const removed = yield* Effect.either(git.removeWorktree(check.entry.path, bareRoot));
+    if (removed._tag === 'Right') {
+      yield* writeStderr(statusLine('pruned', check.entry.branch));
+      return { entry: check.entry, status: 'removed' };
+    }
+
+    yield* writeStderr(statusLine('failed', check.entry.branch, removed.left.message));
+    return { entry: check.entry, status: 'failed', reason: removed.left.message };
+  });
+}
+
+function summarize(results: RemovalResult[]): string {
+  const removedCount = results.filter((result) => result.status === 'removed').length;
+  const failedCount = results.filter((result) => result.status === 'failed').length;
+  return `Prune complete: removed ${removedCount}, failed ${failedCount}.`;
+}
+
+function hasFailedRemoval(results: RemovalResult[]): boolean {
+  return results.some((result) => result.status === 'failed');
 }
 
 function truncate(text: string, maxWidth: number): string {
@@ -205,146 +242,6 @@ function formatFailureTable(results: RemovalResult[]): string | null {
   return [color('Failures', 31), top, header, separator, ...body, bottom].join('\n');
 }
 
-function checkWorktree(entry: WorktreeEntry): Effect.Effect<PruneCheck, Error, Git | Github> {
-  return Effect.gen(function* () {
-    const git = yield* Git;
-    const github = yield* Github;
-    const localHeadOid = yield* git.getHeadOid(entry.path);
-    const pullRequest = yield* github.getPullRequest(entry);
-
-    if (pullRequest === null) {
-      return { kind: 'keep', entry, reason: 'no PR found' };
-    }
-
-    if (pullRequest.state !== 'MERGED') {
-      return { kind: 'keep', entry, reason: `PR is ${pullRequest.state}` };
-    }
-
-    if (pullRequest.headRefOid !== localHeadOid) {
-      return { kind: 'keep', entry, reason: 'PR HEAD does not match local HEAD' };
-    }
-
-    return { kind: 'prune', entry, pullRequest };
-  });
-}
-
-function checkWorktreeBatch(
-  batch: WorktreeEntry[],
-  dashboard: PruneDashboard,
-): Effect.Effect<PruneCheck[], Error, CliServices> {
-  return Effect.forEach(batch, (entry) => checkWorktreeWithDashboard(entry, dashboard), {
-    concurrency: GITHUB_CHECK_CONCURRENCY,
-  });
-}
-
-function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
-  return Effect.gen(function* () {
-    const reporter = yield* Reporter;
-    yield* reporter.writeStderr(message);
-  });
-}
-
-function checkWorktreeWithDashboard(
-  entry: WorktreeEntry,
-  dashboard: PruneDashboard,
-): Effect.Effect<PruneCheck, Error, CliServices> {
-  return Effect.gen(function* () {
-    updateDashboardRow(dashboard, entry, 'checking');
-    yield* renderDashboard(dashboard);
-
-    const result = yield* checkWorktree(entry);
-    dashboard.checkedCount++;
-
-    if (result.kind === 'keep') {
-      updateDashboardRow(dashboard, entry, 'kept', result.reason);
-    } else {
-      updateDashboardRow(dashboard, entry, 'pruning', result.pullRequest.url);
-    }
-
-    yield* renderDashboard(dashboard);
-    return result;
-  });
-}
-
-function checkAllWorktrees(
-  entries: WorktreeEntry[],
-  dashboard: PruneDashboard,
-): Effect.Effect<PruneCheck[], Error, CliServices> {
-  return Effect.gen(function* () {
-    const batches = chunkWorktrees(entries);
-    const checks: PruneCheck[] = [];
-
-    for (const [index, batch] of batches.entries()) {
-      const batchNumber = index + 1;
-
-      const batchChecks = yield* checkWorktreeBatch(batch, dashboard);
-      checks.push(...batchChecks);
-
-      if (batchNumber < batches.length) {
-        yield* Effect.sleep(Duration.millis(GITHUB_BATCH_DELAY_MS));
-      }
-    }
-
-    return checks;
-  });
-}
-
-function removePrunedWorktrees(
-  bareRoot: string,
-  checks: PruneCheck[],
-  dashboard: PruneDashboard,
-): Effect.Effect<RemovalResult[], never, Git | Reporter> {
-  return Effect.gen(function* () {
-    const git = yield* Git;
-    const results: RemovalResult[] = [];
-
-    for (const check of checks) {
-      if (check.kind === 'keep') {
-        results.push({ entry: check.entry, status: 'kept' });
-        continue;
-      }
-
-      const result = yield* removeWorktreeForCheck(git, bareRoot, check, dashboard);
-      results.push(result);
-    }
-
-    return results;
-  });
-}
-
-function removeWorktreeForCheck(
-  git: GitService,
-  bareRoot: string,
-  check: Extract<PruneCheck, { kind: 'prune' }>,
-  dashboard: PruneDashboard,
-): Effect.Effect<RemovalResult, never, Reporter> {
-  return Effect.gen(function* () {
-    updateDashboardRow(dashboard, check.entry, 'pruning', check.pullRequest.url);
-    yield* renderDashboard(dashboard);
-
-    const removed = yield* Effect.either(git.removeWorktree(check.entry.path, bareRoot));
-    if (removed._tag === 'Right') {
-      updateDashboardRow(dashboard, check.entry, 'pruned');
-      yield* renderDashboard(dashboard);
-      return { entry: check.entry, status: 'removed' };
-    }
-
-    updateDashboardRow(dashboard, check.entry, 'failed', removed.left.message);
-    yield* renderDashboard(dashboard);
-    return { entry: check.entry, status: 'failed', reason: removed.left.message };
-  });
-}
-
-function summarize(results: RemovalResult[]): string {
-  const removedCount = results.filter((result) => result.status === 'removed').length;
-  const failedCount = results.filter((result) => result.status === 'failed').length;
-  return `Prune complete: removed ${removedCount}, failed ${failedCount}.`;
-}
-
-function hasFailedRemoval(results: RemovalResult[]): boolean {
-  return results.some((result) => result.status === 'failed');
-}
-
 export function pruneProgram(): Effect.Effect<number, Error, CliServices> {
   return Effect.gen(function* () {
     const git = yield* Git;
@@ -364,21 +261,17 @@ export function pruneProgram(): Effect.Effect<number, Error, CliServices> {
       return 0;
     }
 
-    const dashboard = makeDashboard(entries);
-    yield* renderDashboard(dashboard);
-
-    const checks = yield* checkAllWorktrees(entries, dashboard);
-    const removals = yield* removePrunedWorktrees(bareRoot, checks, dashboard);
-    const summary = summarize(removals);
-    const failed = hasFailedRemoval(removals);
-    yield* finishDashboard(dashboard, summary, failed);
+    yield* writeStderr(`${bold('Pruning')} ${entries.length} worktrees...`);
+    const checks = yield* checkAllWorktrees(entries);
+    const removals = yield* removePrunedWorktrees(bareRoot, checks);
+    yield* writeStderr(summarize(removals));
 
     const failureTable = formatFailureTable(removals);
     if (failureTable !== null) {
       yield* writeStderr(failureTable);
     }
 
-    return failed ? 1 : 0;
+    return hasFailedRemoval(removals) ? 1 : 0;
   });
 }
 

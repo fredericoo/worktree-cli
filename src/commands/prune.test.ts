@@ -210,11 +210,10 @@ describe('wt prune', () => {
     expect(output).toContain('worktree contains uncommitted changes');
   });
 
-  it('renders live worktree statuses when stderr is interactive', async () => {
+  it('renders status rows as worktrees are checked', async () => {
     const mergedWorktree = makeWorktree('merged-feature');
     const openWorktree = makeWorktree('open-feature');
     const { command, logs } = makeTestServices({
-      stderrIsTty: true,
       entries: [mergedWorktree, openWorktree],
       heads: { [mergedWorktree.path]: 'merged-head' },
       pullRequests: {
@@ -235,32 +234,11 @@ describe('wt prune', () => {
 
     expect(exitCode).toBe(0);
     const output = logs.join('\n');
-    expect(output).toContain('Pruning worktrees');
+    expect(output).toContain('Pruning');
+    expect(output).toContain('Checking batch');
     expect(output).toContain('merged-feature');
     expect(output).toContain('pruned');
     expect(output).toContain('open-feature');
     expect(output).toContain('kept');
-  });
-
-  it('renders dashboard updates through the task log abstraction', async () => {
-    const mergedWorktree = makeWorktree('merged-feature');
-    const { command, logs } = makeTestServices({
-      stderrIsTty: true,
-      entries: [mergedWorktree],
-      heads: { [mergedWorktree.path]: 'merged-head' },
-      pullRequests: {
-        [mergedWorktree.branch]: {
-          headRefOid: 'merged-head',
-          state: 'MERGED',
-          url: 'https://github.test/pull/1',
-        },
-      },
-    });
-
-    const exitCode = await command.execute([]);
-
-    expect(exitCode).toBe(0);
-    expect(logs.some((log) => log.startsWith('Pruning worktrees\n'))).toBe(true);
-    expect(logs).toContain('Prune complete: removed 1, failed 0.');
   });
 });
