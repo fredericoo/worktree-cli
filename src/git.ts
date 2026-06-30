@@ -103,7 +103,10 @@ export async function isStandardGitRepo(dir?: string): Promise<boolean> {
 
 export async function isBareRepo(dir?: string): Promise<boolean> {
   try {
-    const result = await runGit(['config', '--get', 'core.bare'], { cwd: dir });
+    const gitCommonDir = await runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: dir,
+    });
+    const result = await runGit(['--git-dir', gitCommonDir, 'config', '--get', 'core.bare']);
     return result === 'true';
   } catch {
     return false;
