@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { stat, rm } from 'fs/promises';
+import { chmod, exists, mkdir, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { createTempDir, createBareRepo, runWt } from '../test-scaffold';
 import { Effect, Layer } from 'effect';
@@ -175,6 +175,39 @@ describe('wt remove', () => {
     }
     expect(exists).toBe(false);
   });
+
+  it(
+    'waits for a slow worktree removal instead of timing out',
+    async () => {
+      await createBareRepo(tempDir);
+      await Bun.spawn(['git', '-C', join(tempDir, 'main'), 'branch', 'slow-remove'], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      }).exited;
+      const coResult = await runWt(['co', 'slow-remove'], join(tempDir, 'main'));
+      expect(coResult.exitCode).toBe(0);
+
+      // Large worktrees (node_modules) take longer to delete than the general git timeout
+      const shimDir = join(tempDir, 'git-shim');
+      await mkdir(shimDir);
+      const realGit = Bun.which('git') ?? 'git';
+      const shimPath = join(shimDir, 'git');
+      await writeFile(
+        shimPath,
+        `#!/bin/sh\nif [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then sleep 11; fi\nexec "${realGit}" "$@"\n`,
+      );
+      await chmod(shimPath, 0o755);
+
+      const result = await runWt(['rm', 'slow-remove'], join(tempDir, 'main'), {
+        PATH: `${shimDir}:${process.env['PATH'] ?? ''}`,
+      });
+
+      expect(result.stderr).not.toContain('timed out');
+      expect(result.exitCode).toBe(0);
+      expect(await exists(coResult.stdout)).toBe(false);
+    },
+    { timeout: 30_000 },
+  );
 
   it('fails when worktree does not exist', async () => {
     await createBareRepo(tempDir);
