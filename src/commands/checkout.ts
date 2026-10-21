@@ -6,21 +6,15 @@
  * stderr: all human-readable messages.
  */
 
+import { Effect, Layer } from 'effect';
+import { join, relative } from 'path';
 import type { CommandHandler } from '../types';
 import type { CommandHelp } from '../help.js';
 import { printCommandUsage } from '../help.js';
-import {
-  isBareRepo,
-  getBareRoot,
-  flattenBranchName,
-  addWorktree,
-  findWorktreeByBranch,
-  getWorktreeEntries,
-  fetchRef,
-  refExists,
-  hasRemoteUrl,
-} from '../git';
-import { join, relative } from 'path';
+import { flattenBranchName } from '../git';
+import { Git, Interactive, livePromptLayer, Reporter, type PromptServices } from '../services';
+
+type CheckoutServices = PromptServices;
 
 const HELP: CommandHelp = {
   name: 'wt checkout',
@@ -67,69 +61,16 @@ With shell integration (wt init zsh), checkout auto-cd's into the worktree.`,
 
 const CREATE_NEW_BRANCH = '__create_new_branch__';
 
-async function promptForBranch(self: CommandHandler): Promise<number> {
-  if (!(await isBareRepo())) {
-    console.error(
-      'Error: Not in a bare repo. wt checkout only works with bare repo worktree setups.',
-    );
-    console.error('Run "wt create" first to convert your repo.');
-    return 1;
-  }
-
-  const { stderrSelect, stderrText, stderrCancel, isCancel } = await import('../interactive.js');
-
-  const bareRoot = await getBareRoot();
-  const entries = await getWorktreeEntries(bareRoot);
-
-  const selected = await stderrSelect({
-    message: 'Which branch?',
-    options: [
-      ...entries.map((entry) => {
-        const relativePath = relative(bareRoot, entry.path);
-        return {
-          value: entry.branch,
-          label: entry.branch,
-          hint: relativePath !== '' ? relativePath : entry.path,
-        };
-      }),
-      {
-        value: CREATE_NEW_BRANCH,
-        label: 'Create new branch + worktree',
-        hint: 'wt co -b <branch>',
-      },
-    ],
-  });
-
-  if (isCancel(selected)) {
-    stderrCancel();
-    return 0;
-  }
-
-  if (selected === CREATE_NEW_BRANCH) {
-    const branchName = await stderrText({
-      message: 'Branch name:',
-      validate: (value) => {
-        if (value === undefined || value.trim() === '') return 'Branch name is required';
-        return undefined;
-      },
-    });
-
-    if (isCancel(branchName)) {
-      stderrCancel();
-      return 0;
-    }
-
-    return self.execute(['-b', branchName]);
-  }
-
-  return self.execute([selected]);
-}
-
 interface CheckoutArgs {
   createBranch: boolean;
   explicitFrom: string | undefined;
   branch: string | undefined;
 }
+
+type StartPointResult =
+  | { resolved: true; startPoint: string; note?: string }
+  | { resolved: false; fallback: true; reason: string }
+  | { resolved: false; fallback: false; error: string };
 
 function parseCheckoutArgs(args: string[]): CheckoutArgs | { error: string } {
   const createBranch = args.includes('-b');
@@ -141,165 +82,345 @@ function parseCheckoutArgs(args: string[]): CheckoutArgs | { error: string } {
   }
 
   const positionalArgs: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '-b') continue;
-    if (args[i] === '--from') {
-      i++;
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '-b') continue;
+    if (args[index] === '--from') {
+      index++;
       continue;
     }
-    const arg = args[i];
+    const arg = args[index];
     if (arg !== undefined) positionalArgs.push(arg);
   }
 
   return { createBranch, explicitFrom, branch: positionalArgs[0] };
 }
 
-type StartPointResult =
-  | { resolved: true; startPoint: string; note?: string }
-  | { resolved: false; fallback: true; reason: string }
-  | { resolved: false; fallback: false; error: string };
-
-async function resolveStartPoint(
-  explicitFrom: string | undefined,
-  bareRoot: string,
-): Promise<StartPointResult> {
-  const baseBranch = explicitFrom ?? 'main';
-  const remote = 'origin';
-
-  if (await hasRemoteUrl(remote, { cwd: bareRoot })) {
-    return resolveFromRemote(remote, baseBranch, explicitFrom, bareRoot);
-  }
-
-  return resolveWithoutRemote(explicitFrom, bareRoot);
+function writeStdout(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.writeStdout(message);
+  });
 }
 
-async function resolveFromRemote(
+function writeStderr(message: string): Effect.Effect<void, never, Reporter> {
+  return Effect.gen(function* () {
+    const reporter = yield* Reporter;
+    yield* reporter.writeStderr(message);
+  });
+}
+
+function promptForBranch(self: CommandHandler): Effect.Effect<number, never, CheckoutServices> {
+  return Effect.gen(function* () {
+    if (!(yield* ensureBareRepo())) return 1;
+
+    const git = yield* Git;
+    const interactive = yield* Interactive;
+    const bareRoot = yield* getRequiredBareRoot();
+    if (bareRoot === null) return 1;
+
+    const entriesResult = yield* Effect.either(git.getWorktreeEntries(bareRoot));
+    if (entriesResult._tag === 'Left') {
+      yield* writeStderr(`Error: ${entriesResult.left.message}`);
+      return 1;
+    }
+
+    const selected = yield* Effect.either(
+      interactive.select('Which branch?', [
+        ...entriesResult.right.map((entry) => {
+          const relativePath = relative(bareRoot, entry.path);
+          return {
+            value: entry.branch,
+            label: entry.branch,
+            hint: relativePath !== '' ? relativePath : entry.path,
+          };
+        }),
+        {
+          value: CREATE_NEW_BRANCH,
+          label: 'Create new branch + worktree',
+          hint: 'wt co -b <branch>',
+        },
+      ]),
+    );
+
+    if (selected._tag === 'Left') {
+      yield* writeStderr(`Error: ${selected.left.message}`);
+      return 1;
+    }
+
+    if (interactive.isCancel(selected.right)) {
+      yield* interactive.cancel();
+      return 0;
+    }
+
+    if (selected.right === CREATE_NEW_BRANCH) {
+      return yield* promptForNewBranch(self);
+    }
+
+    return yield* Effect.promise(() => self.execute([String(selected.right)]));
+  });
+}
+
+function promptForNewBranch(self: CommandHandler): Effect.Effect<number, never, CheckoutServices> {
+  return Effect.gen(function* () {
+    const interactive = yield* Interactive;
+    const branchName = yield* Effect.either(
+      interactive.text('Branch name:', (value) => {
+        if (value === undefined || value.trim() === '') return 'Branch name is required';
+        return undefined;
+      }),
+    );
+
+    if (branchName._tag === 'Left') {
+      yield* writeStderr(`Error: ${branchName.left.message}`);
+      return 1;
+    }
+
+    if (interactive.isCancel(branchName.right)) {
+      yield* interactive.cancel();
+      return 0;
+    }
+
+    return yield* Effect.promise(() => self.execute(['-b', String(branchName.right)]));
+  });
+}
+
+function resolveStartPoint(
+  explicitFrom: string | undefined,
+  bareRoot: string,
+): Effect.Effect<StartPointResult, Error, Git> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const baseBranch = explicitFrom ?? 'main';
+    const remote = 'origin';
+    const hasRemote = yield* git.hasRemoteUrl(remote, bareRoot);
+
+    if (!hasRemote) {
+      return yield* resolveWithoutRemote(explicitFrom, bareRoot);
+    }
+
+    return yield* resolveFromRemote(remote, baseBranch, explicitFrom, bareRoot);
+  });
+}
+
+function resolveFromRemote(
   remote: string,
   baseBranch: string,
   explicitFrom: string | undefined,
   bareRoot: string,
-): Promise<StartPointResult> {
-  const remoteRef = `${remote}/${baseBranch}`;
-  const fetched = await fetchRef(remote, baseBranch, { cwd: bareRoot });
+): Effect.Effect<StartPointResult, Error, Git> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const remoteRef = `${remote}/${baseBranch}`;
+    const fetched = yield* git.fetchRef(remote, baseBranch, bareRoot);
 
-  if (fetched && (await refExists(remoteRef, { cwd: bareRoot }))) {
-    return { resolved: true, startPoint: remoteRef };
-  }
+    if (fetched && (yield* git.refExists(remoteRef, bareRoot))) {
+      return { resolved: true, startPoint: remoteRef };
+    }
 
-  if (explicitFrom !== undefined) {
-    return {
-      resolved: false,
-      fallback: false,
-      error: `Could not resolve '${baseBranch}' from ${remote}`,
-    };
-  }
-
-  return { resolved: false, fallback: true, reason: 'Could not fetch origin/main, branching from HEAD' };
-}
-
-async function resolveWithoutRemote(
-  explicitFrom: string | undefined,
-  bareRoot: string,
-): Promise<StartPointResult> {
-  if (explicitFrom !== undefined) {
-    const localRef = `refs/heads/${explicitFrom}`;
-    if (await refExists(localRef, { cwd: bareRoot })) {
+    if (explicitFrom !== undefined) {
       return {
-        resolved: true,
-        startPoint: explicitFrom,
-        note: `No remote URL configured, using local '${explicitFrom}' as start point`,
+        resolved: false,
+        fallback: false,
+        error: `Could not resolve '${baseBranch}' from ${remote}`,
       };
     }
+
     return {
       resolved: false,
-      fallback: false,
-      error: `No remote URL configured and local branch '${explicitFrom}' does not exist`,
+      fallback: true,
+      reason: 'Could not fetch origin/main, branching from HEAD',
     };
-  }
-
-  return { resolved: false, fallback: true, reason: 'No remote URL configured, branching from HEAD' };
+  });
 }
 
-async function createWorktree(
+function resolveWithoutRemote(
+  explicitFrom: string | undefined,
+  bareRoot: string,
+): Effect.Effect<StartPointResult, Error, Git> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+
+    if (explicitFrom !== undefined) {
+      const localRef = `refs/heads/${explicitFrom}`;
+      if (yield* git.refExists(localRef, bareRoot)) {
+        return {
+          resolved: true,
+          startPoint: explicitFrom,
+          note: `No remote URL configured, using local '${explicitFrom}' as start point`,
+        };
+      }
+      return {
+        resolved: false,
+        fallback: false,
+        error: `No remote URL configured and local branch '${explicitFrom}' does not exist`,
+      };
+    }
+
+    return {
+      resolved: false,
+      fallback: true,
+      reason: 'No remote URL configured, branching from HEAD',
+    };
+  });
+}
+
+function createWorktree(
   worktreePath: string,
   branch: string,
   options: { createBranch: boolean; startPoint: string | undefined; cwd: string },
-): Promise<number> {
-  try {
-    const worktreeOptions = {
-      createBranch: options.createBranch,
-      cwd: options.cwd,
-      ...(options.startPoint !== undefined && { startPoint: options.startPoint }),
-    };
-    await addWorktree(worktreePath, branch, worktreeOptions);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Error: ${message}`);
-    return 1;
-  }
+): Effect.Effect<number, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const worktreeOptions =
+      options.startPoint !== undefined
+        ? { createBranch: options.createBranch, cwd: options.cwd, startPoint: options.startPoint }
+        : { createBranch: options.createBranch, cwd: options.cwd };
 
-  console.log(worktreePath);
-  return 0;
+    const added = yield* Effect.either(git.addWorktree(worktreePath, branch, worktreeOptions));
+    if (added._tag === 'Left') {
+      yield* writeStderr(`Error: ${added.left.message}`);
+      return 1;
+    }
+
+    yield* writeStdout(worktreePath);
+    return 0;
+  });
 }
 
-export const command: CommandHandler = {
-  name: 'checkout',
-  description: 'Create or switch to a worktree for a branch',
-  getHelp: () => HELP,
+function ensureBareRepo(): Effect.Effect<boolean, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const bareRepo = yield* Effect.either(git.isBareRepo);
 
-  async execute(args: string[]): Promise<number> {
-    const parsed = parseCheckoutArgs(args);
-    if ('error' in parsed) {
-      console.error(`Error: ${parsed.error}`);
-      return 1;
+    if (bareRepo._tag === 'Right' && bareRepo.right) return true;
+
+    yield* writeStderr(
+      'Error: Not in a bare repo. wt checkout only works with bare repo worktree setups.',
+    );
+    yield* writeStderr('Run "wt create" first to convert your repo.');
+    return false;
+  });
+}
+
+function getRequiredBareRoot(): Effect.Effect<string | null, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const bareRoot = yield* Effect.either(git.getBareRoot);
+
+    if (bareRoot._tag === 'Right') return bareRoot.right;
+
+    yield* writeStderr(`Error: ${bareRoot.left.message}`);
+    return null;
+  });
+}
+
+function printExistingWorktree(
+  branch: string,
+  bareRoot: string,
+): Effect.Effect<boolean, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    const git = yield* Git;
+    const existingPath = yield* Effect.either(git.findWorktreeByBranch(branch, bareRoot));
+
+    if (existingPath._tag === 'Left') {
+      yield* writeStderr(`Error: ${existingPath.left.message}`);
+      return true;
     }
 
+    if (existingPath.right === null) return false;
+
+    yield* writeStdout(existingPath.right);
+    return true;
+  });
+}
+
+function resolveOptionalStartPoint(
+  createBranch: boolean,
+  explicitFrom: string | undefined,
+  bareRoot: string,
+): Effect.Effect<string | null | undefined, never, Git | Reporter> {
+  return Effect.gen(function* () {
+    if (!createBranch) return undefined;
+
+    const startPointResult = yield* Effect.either(resolveStartPoint(explicitFrom, bareRoot));
+    if (startPointResult._tag === 'Left') {
+      yield* writeStderr(`Error: ${startPointResult.left.message}`);
+      return null;
+    }
+
+    const result = startPointResult.right;
+    if (result.resolved) {
+      yield* writeStderr(result.note ?? `Creating branch from ${result.startPoint}`);
+      return result.startPoint;
+    }
+
+    if (!result.fallback) {
+      yield* writeStderr(`Error: ${result.error}`);
+      return null;
+    }
+
+    yield* writeStderr(`Note: ${result.reason}`);
+    return undefined;
+  });
+}
+
+export function checkoutProgram(
+  parsed: CheckoutArgs,
+): Effect.Effect<number, never, CheckoutServices> {
+  return Effect.gen(function* () {
     const { createBranch, explicitFrom, branch } = parsed;
 
-    if (branch === undefined || branch === '') {
-      if (process.stdin.isTTY !== true) {
-        printCommandUsage(HELP);
-        return 1;
-      }
-      return promptForBranch(this);
-    }
+    if (!(yield* ensureBareRepo())) return 1;
 
-    if (!(await isBareRepo())) {
-      console.error(
-        'Error: Not in a bare repo. wt checkout only works with bare repo worktree setups.',
-      );
-      console.error('Run "wt create" first to convert your repo.');
-      return 1;
-    }
+    const bareRoot = yield* getRequiredBareRoot();
+    if (bareRoot === null) return 1;
 
-    const bareRoot = await getBareRoot();
+    const branchName = branch ?? '';
+    if (yield* printExistingWorktree(branchName, bareRoot)) return 0;
 
-    const existingPath = await findWorktreeByBranch(branch, bareRoot);
-    if (existingPath !== null) {
-      console.log(existingPath);
-      return 0;
-    }
+    const startPoint = yield* resolveOptionalStartPoint(createBranch, explicitFrom, bareRoot);
+    if (startPoint === null) return 1;
 
-    let startPoint: string | undefined;
-
-    if (createBranch) {
-      const result = await resolveStartPoint(explicitFrom, bareRoot);
-
-      if (result.resolved) {
-        startPoint = result.startPoint;
-        const message = result.note ?? `Creating branch from ${result.startPoint}`;
-        console.error(message);
-      } else if (!result.fallback) {
-        console.error(`Error: ${result.error}`);
-        return 1;
-      } else {
-        console.error(`Note: ${result.reason}`);
-      }
-    }
-
-    const worktreeDir = flattenBranchName(branch);
+    const worktreeDir = flattenBranchName(branchName);
     const worktreePath = join(bareRoot, worktreeDir);
 
-    return createWorktree(worktreePath, branch, { createBranch, startPoint, cwd: bareRoot });
-  },
-};
+    return yield* createWorktree(worktreePath, branchName, {
+      createBranch,
+      startPoint,
+      cwd: bareRoot,
+    });
+  });
+}
+
+export function makeCheckoutCommand(
+  layer: Layer.Layer<CheckoutServices>,
+  options: { isTty?: () => boolean } = {},
+): CommandHandler {
+  const isTty = options.isTty ?? (() => process.stdin.isTTY === true);
+
+  return {
+    name: 'checkout',
+    description: 'Create or switch to a worktree for a branch',
+    getHelp: () => HELP,
+
+    async execute(args: string[]): Promise<number> {
+      const parsed = parseCheckoutArgs(args);
+      if ('error' in parsed) {
+        console.error(`Error: ${parsed.error}`);
+        return 1;
+      }
+
+      if (parsed.branch === undefined || parsed.branch === '') {
+        if (!isTty()) {
+          printCommandUsage(HELP);
+          return 1;
+        }
+        return Effect.runPromise(Effect.provide(promptForBranch(this), layer));
+      }
+
+      return Effect.runPromise(Effect.provide(checkoutProgram(parsed), layer));
+    },
+  };
+}
+
+export const command: CommandHandler = makeCheckoutCommand(livePromptLayer());

@@ -28,7 +28,8 @@ export class GitTimeoutError extends Error {
 
 interface RunGitOptions {
   cwd?: string | undefined;
-  timeoutMs?: number | undefined;
+  /** `null` disables the timeout, for local commands whose duration scales with disk work. */
+  timeoutMs?: number | null | undefined;
 }
 
 interface GitResult {
@@ -51,6 +52,15 @@ async function spawnGit(args: string[], options: RunGitOptions = {}): Promise<Gi
 
   const proc = Bun.spawn(['git', ...args], spawnOptions);
 
+  const resultPromise = (async () => {
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+  })();
+
+  if (timeoutMs === null) return resultPromise;
+
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -59,13 +69,6 @@ async function spawnGit(args: string[], options: RunGitOptions = {}): Promise<Gi
       reject(new GitTimeoutError(args[0] ?? 'unknown'));
     }, timeoutMs);
   });
-
-  const resultPromise = (async () => {
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
-    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
-  })();
 
   try {
     const result = await Promise.race([resultPromise, timeoutPromise]);
@@ -103,7 +106,10 @@ export async function isStandardGitRepo(dir?: string): Promise<boolean> {
 
 export async function isBareRepo(dir?: string): Promise<boolean> {
   try {
-    const result = await runGit(['config', '--get', 'core.bare'], { cwd: dir });
+    const gitCommonDir = await runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: dir,
+    });
+    const result = await runGit(['--git-dir', gitCommonDir, 'config', '--get', 'core.bare']);
     return result === 'true';
   } catch {
     return false;
@@ -213,7 +219,8 @@ export async function removeWorktree(
       ? ['worktree', 'remove', '--force', worktreePath]
       : ['worktree', 'remove', worktreePath];
 
-  await runGit(args, { cwd: options.cwd });
+  // Killing a removal midway leaves a half-deleted worktree that git still registers
+  await runGit(args, { cwd: options.cwd, timeoutMs: null });
 }
 
 export async function deleteBranch(branch: string, dir?: string): Promise<void> {
@@ -226,6 +233,10 @@ export async function setConfig(key: string, value: string, dir?: string): Promi
 
 export async function listWorktrees(dir?: string): Promise<string> {
   return runGit(['worktree', 'list'], { cwd: dir });
+}
+
+export async function getHeadOid(dir?: string): Promise<string> {
+  return runGit(['rev-parse', 'HEAD'], { cwd: dir });
 }
 
 export interface WorktreeEntry {

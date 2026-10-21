@@ -76,6 +76,9 @@ wt rm feature-branch --delete-branch
 
 # Force removal with uncommitted changes
 wt rm feature-branch --force
+
+# Remove worktrees whose GitHub PR is merged at local HEAD
+wt prune
 ```
 
 ## How It Works
@@ -83,7 +86,7 @@ wt rm feature-branch --force
 - `wt checkout` prints ONLY the worktree path to stdout. All messages go to stderr.
 - The shell wrapper (from `wt init`) captures stdout and `cd`s into it.
 - Without shell integration, use `cd $(wt co branch)`.
-- Must be inside a bare repo (created by `wt create`) for checkout/remove/list.
+- Must be inside a bare repo (created by `wt create`) for checkout/remove/prune/list.
 
 ## Command Reference
 
@@ -95,5 +98,6 @@ wt rm feature-branch --force
 | `wt remove <branch>` / `wt rm <branch>` | Remove a worktree |
 | `wt rm <branch> --delete-branch` | Remove worktree and delete the branch |
 | `wt rm <branch> --force` | Force removal with uncommitted changes |
+| `wt prune` | Remove worktrees whose GitHub PR is merged at local HEAD |
 | `wt list` | List all worktrees |
 | `wt init <bash\|zsh\|fish>` | Output shell wrapper for auto-cd |

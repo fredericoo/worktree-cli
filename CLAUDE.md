@@ -19,6 +19,7 @@ eval "$(wt init zsh)"  # Add to ~/.zshrc
 | `wt co -b <branch>` | Create worktree for a new branch |
 | `wt remove <branch>` / `wt rm` | Remove a worktree |
 | `wt rm <branch> --delete-branch` | Remove worktree and delete the branch |
+| `wt prune` | Remove worktrees whose GitHub PR is merged at local HEAD |
 | `wt list` | List all worktrees |
 | `wt init <bash\|zsh\|fish>` | Output shell wrapper for auto-cd |
 

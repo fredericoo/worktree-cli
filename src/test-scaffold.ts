@@ -64,12 +64,13 @@ export async function createBareRepoWithRemote(dir: string): Promise<string> {
 export async function runWt(
   args: string[],
   cwd?: string,
+  env: Record<string, string> = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const cliPath = join(import.meta.dir, 'cli.ts');
   const spawnOptions =
     cwd !== undefined
-      ? { stdout: 'pipe' as const, stderr: 'pipe' as const, cwd }
-      : { stdout: 'pipe' as const, stderr: 'pipe' as const };
+      ? { stdout: 'pipe' as const, stderr: 'pipe' as const, cwd, env: { ...process.env, ...env } }
+      : { stdout: 'pipe' as const, stderr: 'pipe' as const, env: { ...process.env, ...env } };
   const proc = Bun.spawn(['bun', 'run', cliPath, ...args], spawnOptions);
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();

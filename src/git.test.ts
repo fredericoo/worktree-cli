@@ -93,6 +93,42 @@ describe('git repo detection', () => {
 
       expect(await isBareRepo(tempDir)).toBe(true);
     });
+
+    it('returns true from a linked worktree with worktree config enabled', async () => {
+      await createBareRepo(tempDir);
+
+      const successExitCode = 0;
+      const bareDir = join(tempDir, '.bare');
+      const mainDir = join(tempDir, 'main');
+
+      const worktreeConfigExitCode = await Bun.spawn(
+        ['git', '-C', bareDir, 'config', 'extensions.worktreeConfig', 'true'],
+        {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      ).exited;
+      expect(worktreeConfigExitCode).toBe(successExitCode);
+
+      const coreBareConfigExitCode = await Bun.spawn(
+        ['git', '-C', mainDir, 'config', '--worktree', 'core.bare', 'false'],
+        {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      ).exited;
+      expect(coreBareConfigExitCode).toBe(successExitCode);
+
+      const coreBareProc = Bun.spawn(['git', '-C', mainDir, 'config', '--get', 'core.bare'], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const coreBare = await new Response(coreBareProc.stdout).text();
+      expect(await coreBareProc.exited).toBe(successExitCode);
+      expect(coreBare.trim()).toBe('false');
+
+      expect(await isBareRepo(mainDir)).toBe(true);
+    });
   });
 
   describe('hasUncommittedChanges', () => {

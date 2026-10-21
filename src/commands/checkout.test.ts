@@ -2,6 +2,118 @@ import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { stat, rm } from 'fs/promises';
 import { join } from 'path';
 import { createTempDir, createBareRepo, createBareRepoWithRemote, runWt } from '../test-scaffold';
+import { Effect, Layer } from 'effect';
+import {
+  Git,
+  type GitService,
+  Interactive,
+  type InteractiveService,
+  Reporter,
+  type ReporterService,
+} from '../services';
+import { makeCheckoutCommand } from './checkout';
+
+const bareRoot = '/repo';
+
+function makeTestCommand(
+  options: {
+    isBareRepo?: boolean;
+    existingPath?: string | null;
+    hasRemote?: boolean;
+    fetched?: boolean;
+    refs?: Set<string>;
+    selectResponse?: string | symbol;
+    textResponse?: string | symbol;
+  } = {},
+) {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const addedWorktrees: Array<{
+    path: string;
+    branch: string;
+    createBranch: boolean;
+    startPoint: string | undefined;
+  }> = [];
+
+  const git: GitService = {
+    isStandardGitRepo: () => Effect.fail(new Error('not needed')),
+    isBareRepo: Effect.succeed(options.isBareRepo ?? true),
+    hasUncommittedChanges: () => Effect.fail(new Error('not needed')),
+    getDefaultBranch: () => Effect.fail(new Error('not needed')),
+    getUntrackedFiles: () => Effect.fail(new Error('not needed')),
+    getBareRoot: Effect.succeed(bareRoot),
+    listWorktrees: () => Effect.fail(new Error('not needed')),
+    getWorktreeEntries: () =>
+      Effect.succeed([{ path: '/repo/existing-feature', branch: 'existing-feature' }]),
+    findWorktreeByBranch: () => Effect.succeed(options.existingPath ?? null),
+    getHeadOid: () => Effect.fail(new Error('not needed')),
+    addWorktree: (worktreePath, branch, addOptions) =>
+      Effect.sync(() => {
+        addedWorktrees.push({
+          path: worktreePath,
+          branch,
+          createBranch: addOptions.createBranch === true,
+          startPoint: addOptions.startPoint,
+        });
+      }),
+    hasRemoteUrl: () => Effect.succeed(options.hasRemote ?? false),
+    fetchRef: () => Effect.succeed(options.fetched ?? false),
+    refExists: (ref) => Effect.succeed(options.refs?.has(ref) ?? false),
+    removeWorktree: () => Effect.fail(new Error('not needed')),
+    deleteBranch: () => Effect.fail(new Error('not needed')),
+    setConfig: () => Effect.fail(new Error('not needed')),
+  };
+
+  const reporter: ReporterService = {
+    stderrIsTty: false,
+    log: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStdout: (message) =>
+      Effect.sync(() => {
+        stdout.push(message);
+      }),
+    writeStderr: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    writeStderrRaw: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+    createTaskLog: (title) => ({
+      message: (message) => stderr.push(`${title}\n${message}`),
+      success: (message) => stderr.push(message),
+      error: (message) => stderr.push(message),
+    }),
+  };
+
+  const interactive: InteractiveService = {
+    select: () => Effect.succeed(options.selectResponse ?? 'existing-feature'),
+    text: () => Effect.succeed(options.textResponse ?? 'new-feature'),
+    isCancel: () => false,
+    cancel: () => Effect.sync(() => {}),
+    warn: (message) =>
+      Effect.sync(() => {
+        stderr.push(message);
+      }),
+  };
+
+  const layer = Layer.mergeAll(
+    Layer.succeed(Git, git),
+    Layer.succeed(Interactive, interactive),
+    Layer.succeed(Reporter, reporter),
+  );
+
+  return {
+    addedWorktrees,
+    command: makeCheckoutCommand(layer),
+    promptCommand: makeCheckoutCommand(layer, { isTty: () => true }),
+    stderr,
+    stdout,
+  };
+}
 
 describe('wt checkout', () => {
   let tempDir: string;
@@ -104,6 +216,75 @@ describe('wt checkout', () => {
     const lines = result.stdout.split('\n');
     expect(lines.length).toBe(1);
     expect(result.stdout).toMatch(/^\//);
+  });
+
+  it('returns an existing worktree path through injected services', async () => {
+    const { command, stdout, stderr, addedWorktrees } = makeTestCommand({
+      existingPath: '/repo/existing-feature',
+    });
+
+    const exitCode = await command.execute(['existing-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/existing-feature']);
+    expect(stderr).toEqual([]);
+    expect(addedWorktrees).toEqual([]);
+  });
+
+  it('creates a branch from origin main through injected services', async () => {
+    const { command, stdout, stderr, addedWorktrees } = makeTestCommand({
+      hasRemote: true,
+      fetched: true,
+      refs: new Set(['origin/main']),
+    });
+
+    const exitCode = await command.execute(['-b', 'new-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/new-feature']);
+    expect(stderr).toContain('Creating branch from origin/main');
+    expect(addedWorktrees).toEqual([
+      {
+        path: '/repo/new-feature',
+        branch: 'new-feature',
+        createBranch: true,
+        startPoint: 'origin/main',
+      },
+    ]);
+  });
+
+  it('falls back to HEAD when no remote is configured through injected services', async () => {
+    const { command, stderr, addedWorktrees } = makeTestCommand();
+
+    const exitCode = await command.execute(['-b', 'fallback-feature']);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain('Note: No remote URL configured, branching from HEAD');
+    expect(addedWorktrees[0]?.startPoint).toBeUndefined();
+  });
+
+  it('prompts for an existing branch through injected services', async () => {
+    const { promptCommand, stdout } = makeTestCommand({
+      existingPath: '/repo/existing-feature',
+      selectResponse: 'existing-feature',
+    });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(['/repo/existing-feature']);
+  });
+
+  it('prompts for a new branch name through injected services', async () => {
+    const { promptCommand, addedWorktrees } = makeTestCommand({
+      selectResponse: '__create_new_branch__',
+      textResponse: 'prompt-feature',
+    });
+
+    const exitCode = await promptCommand.execute([]);
+
+    expect(exitCode).toBe(0);
+    expect(addedWorktrees[0]?.branch).toBe('prompt-feature');
   });
 });
 
